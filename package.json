@@ -1,0 +1,36 @@
+{
+    "name": "solana-slippage-bot",
+    "version": "1.0.0",
+    "description": "A terminal-based bot that monitors price differences between Solana markets",
+    "main": "index.js",
+    "scripts": {
+      "start": "node --no-inspect index.js",
+      "start-win": "set NODE_OPTIONS=--no-inspect && node index.js",
+      "debug": "node index.js",
+      "test": "echo \"Error: no test specified\" && exit 1"
+    },
+    "keywords": [
+      "solana",
+      "crypto",
+      "trading",
+      "bot",
+      "arbitrage",
+      "slippage"
+    ],
+    "author": "",
+    "license": "MIT",
+    "dependencies": {
+      "@solana/spl-token": "^0.3.11",
+      "@solana/spl-token-registry": "^0.2.4574",
+      "@solana/web3.js": "^1.98.0",
+      "bs58": "^6.0.0",
+      "chalk": "^4.1.2",
+      "cli-table3": "^0.6.5",
+      "colors": "^1.4.0",
+      "decimal.js": "^10.5.0",
+      "dotenv": "^16.5.0",
+      "node-fetch": "^2.7.0"
+    },
+    "devDependencies": {}
+  }
+  
