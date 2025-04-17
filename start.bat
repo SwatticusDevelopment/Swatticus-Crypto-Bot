@@ -1,25 +1,36 @@
 @echo off
-echo Starting Solana Slippage Bot with Jupiter API...
+echo ===============================
+echo Swatticus Development Bot
+echo ===============================
 echo.
-echo WARNING: This bot will execute REAL trades with your wallet!
-echo It will track price movements using Jupiter's API to find opportunities.
-echo Make sure you've reviewed the code and understand the risks.
+echo Starting Swatticus Development Solana Trading Bot...
 echo.
-echo Press Ctrl+C now to abort, or
-pause
+echo Press Ctrl+C to stop the bot
+echo.
 
-:: Set Node.js options to disable debugger
-set NODE_OPTIONS=--no-inspect
+:: Set Node options to disable warnings
+set NODE_OPTIONS=--no-deprecation
 
-:: Run the bot
-node index.js
+:: Check node installation
+where node >nul 2>nul
+if %ERRORLEVEL% neq 0 (
+  echo ERROR: Node.js is not installed or not in PATH
+  echo Please install Node.js from https://nodejs.org/
+  pause
+  exit /b 1
+)
 
-:: If there's an error, pause to see the message
-if %ERRORLEVEL% NEQ 0 (
+:: Optional: Create logs directory if it doesn't exist
+if not exist ".\logs" mkdir ".\logs"
+
+:: Start the bot with logging
+echo [%date% %time%] Bot starting > .\logs\startup.log
+node src/server.js
+
+:: If the bot crashes, give time to read error message
+if %ERRORLEVEL% neq 0 (
   echo.
-  echo Bot exited with an error. Press any key to close this window.
-  pause > nul
-) else (
-  echo.
-  echo Bot exited normally. Press any key to close this window.
-  pause > nul
+  echo Bot crashed or stopped with error code %ERRORLEVEL%
+  echo Check logs for details
+  timeout /t 10
+)
