@@ -10,12 +10,60 @@ class EnhancedTradingStrategy {
         this.previousPrices = {};
         this.priceMovementData = {};
         this.lastOpportunityCheck = 0;
-        this.minMovementThreshold = 0.05; // 0.05% minimum movement to consider
+        
+        // Set the initial threshold from config or use default
+        this.minMovementThreshold = parseFloat(process.env.MIN_MOVEMENT_THRESHOLD) || 0.05;
+        
+        // Store the original threshold to use during resets
+        this.originalThreshold = this.minMovementThreshold;
+        
         this.highValuePairs = ['SOL/USDC', 'SOL/USDT', 'USDC/SOL', 'USDT/SOL'];
         this.recentProfit = 0;
         this.profitTimeWindow = 3600000; // 1 hour in milliseconds
         this.profitHistory = [];
+        
+        // Last time the threshold was reset
+        this.lastThresholdReset = Date.now();
+        
+        // Setup opportunity detection
         this.setupOpportunityDetection();
+        
+        // Setup threshold reset timer if enabled in config
+        if (process.env.RESET_OPPORTUNITY_THRESHOLDS === 'true') {
+            this.setupThresholdResets();
+        }
+    }
+
+    setupThresholdResets() {
+        const resetInterval = parseInt(process.env.THRESHOLD_RESET_INTERVAL) || 600000; // Default 10 minutes
+        
+        console.log(chalk.blue(`Setting up opportunity threshold resets every ${resetInterval/60000} minutes`));
+        
+        // Create interval to reset thresholds periodically
+        setInterval(() => {
+            // Reset the threshold to its original value
+            this.minMovementThreshold = this.originalThreshold;
+            
+            // Log the reset
+            console.log(chalk.yellow(`⚠️ Opportunity threshold reset to ${this.minMovementThreshold.toFixed(4)}%`));
+            
+            // Force a price update to look for new opportunities
+            this.lastOpportunityCheck = 0;
+            
+            // Update last reset time
+            this.lastThresholdReset = Date.now();
+            
+            // Log the reset to the opportunity log
+            try {
+                const logEntry = `[${new Date().toISOString()}] THRESHOLD RESET: Reverted to ${this.minMovementThreshold.toFixed(4)}%\n`;
+                fs.appendFileSync(
+                    path.join(__dirname, 'logs', 'enhanced_opportunities.log'), 
+                    logEntry
+                );
+            } catch (error) {
+                console.error(chalk.yellow('Error logging threshold reset:'), error);
+            }
+        }, resetInterval);
     }
 
     setupOpportunityDetection() {
@@ -414,13 +462,25 @@ class EnhancedTradingStrategy {
         console.log(chalk.blue(`Hourly profit: ${this.recentProfit.toFixed(6)} SOL`));
         
         // Check if we're meeting the hourly goal
-        if (this.recentProfit < 1.0) {
-            // Adjust strategy to be more aggressive
-            this.minMovementThreshold = Math.max(0.03, this.minMovementThreshold * 0.9);
-            console.log(chalk.yellow(`Adjusting opportunity threshold to ${this.minMovementThreshold.toFixed(4)}%`));
+        if (this.recentProfit < 0.1) { // Lowered target to be more realistic
+            // Adjust strategy to be more aggressive, but not too aggressive
+            const newThreshold = Math.max(0.03, this.minMovementThreshold * 0.9);
+            console.log(chalk.yellow(`Adjusting opportunity threshold to ${newThreshold.toFixed(4)}%`));
+            this.minMovementThreshold = newThreshold;
         } else {
             // We're meeting goals, can be slightly more conservative
-            this.minMovementThreshold = Math.min(0.08, this.minMovementThreshold * 1.05);
+            // But don't increase too much - maintain trading frequency
+            const newThreshold = Math.min(this.originalThreshold, this.minMovementThreshold * 1.03);
+            this.minMovementThreshold = newThreshold;
+        }
+        
+        // If it's been over twice the reset interval since the last reset,
+        // force a reset now (safeguard against threshold dropping too low)
+        const resetInterval = parseInt(process.env.THRESHOLD_RESET_INTERVAL) || 600000;
+        if (now - this.lastThresholdReset > resetInterval * 2) {
+            console.log(chalk.red('⚠️ Emergency threshold reset - too long since last reset'));
+            this.minMovementThreshold = this.originalThreshold;
+            this.lastThresholdReset = now;
         }
     }
     
