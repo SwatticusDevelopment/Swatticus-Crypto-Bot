@@ -1,0 +1,681 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Solana Slippage Bot Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-dark: #0a0413;
+            --bg-secondary: #130a1a;
+            --accent-pink: #ff3366;
+            --accent-light-pink: #ff6688;
+            --text-primary: #f0f0f0;
+            --text-secondary: #c0c0c0;
+        }
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: var(--bg-dark);
+            color: var(--text-primary);
+        }
+        .btn-primary {
+            background-color: var(--accent-pink);
+            color: white;
+            transition: all 0.3s ease;
+        }
+        .btn-primary:hover {
+            background-color: var(--accent-light-pink);
+            transform: scale(1.05);
+        }
+        .btn-disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        .card {
+            background-color: var(--bg-secondary);
+            border-radius: 0.5rem;
+            padding: 1.5rem;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            transition: transform 0.3s ease;
+        }
+        .card:hover {
+            transform: translateY(-5px);
+        }
+        .animate-pulse {
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.5; }
+            100% { opacity: 1; }
+        }
+    </style>
+</head>
+<body class="bg-[var(--bg-dark)] text-[var(--text-primary)] p-8">
+    <div class="container mx-auto">
+        <h1 class="text-4xl font-bold text-center mb-8 text-[var(--accent-pink)]">
+            Solana Slippage Bot Dashboard
+        </h1>
+
+        <div class="grid md:grid-cols-3 gap-6">
+            <!-- Connection Status -->
+            <div class="card">
+                <h2 class="text-2xl font-semibold mb-4 text-[var(--accent-pink)]">Connection</h2>
+                <div id="connectionStatus" class="text-center">
+                    <p id="socketStatus" class="font-bold text-yellow-400">🟡 Not Connected</p>
+                    <p id="walletAddress" class="text-sm text-[var(--text-secondary)] mt-2">
+                        Wallet: Not Connected
+                    </p>
+                </div>
+                <div class="mt-4 space-y-2">
+                    <button id="connectWallet" class="btn-primary w-full py-2 rounded-lg">
+                        Connect Wallet
+                    </button>
+                    <button id="startBot" class="btn-primary w-full py-2 rounded-lg btn-disabled" disabled>
+                        Start Trading Bot
+                    </button>
+                    <button id="stopBot" class="btn-primary w-full py-2 rounded-lg btn-disabled" disabled>
+                        Stop Trading Bot
+                    </button>
+                </div>
+            </div>
+
+            <!-- Wallet Summary -->
+            <div class="card">
+                <h2 class="text-2xl font-semibold mb-4 text-[var(--accent-pink)]">Wallet Summary</h2>
+                <div class="space-y-3">
+                    <div class="flex justify-between">
+                        <span class="text-[var(--text-secondary)]">Bot Status</span>
+                        <span id="botStatus" class="font-bold text-yellow-400">Inactive</span>
+                    </div>
+                    <div class="flex justify-between">
+                        <span class="text-[var(--text-secondary)]">SOL Balance</span>
+                        <span id="solBalance" class="font-bold text-green-400">0.00 SOL</span>
+                    </div>
+                    <div class="flex justify-between">
+                        <span class="text-[var(--text-secondary)]">USDC Balance</span>
+                        <span id="usdcBalance" class="font-bold text-green-400">0.00 USDC</span>
+                    </div>
+                    <div class="flex justify-between">
+                        <span class="text-[var(--text-secondary)]">USDT Balance</span>
+                        <span id="usdtBalance" class="font-bold text-green-400">0.00 USDT</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Trading Pairs -->
+            <div class="card">
+                <h2 class="text-2xl font-semibold mb-4 text-[var(--accent-pink)]">Trading Pairs</h2>
+                <div id="tradingPairs" class="space-y-2">
+                    <div class="flex justify-between items-center">
+                        <span class="text-[var(--text-secondary)]">SOL/USDC</span>
+                        <span id="sol-usdc-status" class="text-yellow-400 font-bold text-sm">Inactive</span>
+                    </div>
+                    <div class="flex justify-between items-center">
+                        <span class="text-[var(--text-secondary)]">SOL/USDT</span>
+                        <span id="sol-usdt-status" class="text-yellow-400 font-bold text-sm">Inactive</span>
+                    </div>
+                    <div class="flex justify-between items-center">
+                        <span class="text-[var(--text-secondary)]">USDC/SOL</span>
+                        <span id="usdc-sol-status" class="text-yellow-400 font-bold text-sm">Inactive</span>
+                    </div>
+                    <div class="flex justify-between items-center">
+                        <span class="text-[var(--text-secondary)]">USDT/SOL</span>
+                        <span id="usdt-sol-status" class="text-yellow-400 font-bold text-sm">Inactive</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Recent Trades and Price Data -->
+        <div class="grid md:grid-cols-2 gap-6 mt-6">
+            <!-- Recent Trades -->
+            <div class="card">
+                <h2 class="text-2xl font-semibold mb-4 text-[var(--accent-pink)]">Recent Trades</h2>
+                <div id="recentTrades" class="space-y-2">
+                    <p class="text-[var(--text-secondary)] text-center">No recent trades</p>
+                </div>
+            </div>
+            
+            <!-- Total Profits -->
+            <div class="card">
+                <h2 class="text-2xl font-semibold mb-4 text-[var(--accent-pink)]">Total Profits</h2>
+                <div class="space-y-3">
+                    <div class="flex justify-between">
+                        <span class="text-[var(--text-secondary)]">SOL Profit</span>
+                        <span id="solProfit" class="font-bold text-green-400">0.00 SOL</span>
+                    </div>
+                    <div class="flex justify-between">
+                        <span class="text-[var(--text-secondary)]">USDC Profit</span>
+                        <span id="usdcProfit" class="font-bold text-green-400">0.00 USDC</span>
+                    </div>
+                    <div class="flex justify-between">
+                        <span class="text-[var(--text-secondary)]">USDT Profit</span>
+                        <span id="usdtProfit" class="font-bold text-green-400">0.00 USDT</span>
+                    </div>
+                    <div class="flex justify-between pt-2 border-t border-gray-700">
+                        <span class="text-[var(--text-secondary)]">Active Trades</span>
+                        <span id="activeTrades" class="font-bold text-blue-400">0</span>
+                    </div>
+                    <div class="flex justify-between">
+                        <span class="text-[var(--text-secondary)]">Completed Trades</span>
+                        <span id="completedTrades" class="font-bold text-blue-400">0</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Price Data -->
+        <div class="mt-6 card">
+            <h2 class="text-2xl font-semibold mb-4 text-[var(--accent-pink)]">Live Price Data</h2>
+            <div id="priceData" class="grid grid-cols-2 gap-4">
+                <div class="flex justify-between">
+                    <span class="text-[var(--text-secondary)]">SOL/USDC</span>
+                    <span id="sol-usdc-price" class="font-bold">Loading...</span>
+                </div>
+                <div class="flex justify-between">
+                    <span class="text-[var(--text-secondary)]">SOL/USDT</span>
+                    <span id="sol-usdt-price" class="font-bold">Loading...</span>
+                </div>
+                <div class="flex justify-between">
+                    <span class="text-[var(--text-secondary)]">USDC/SOL</span>
+                    <span id="usdc-sol-price" class="font-bold">Loading...</span>
+                </div>
+                <div class="flex justify-between">
+                    <span class="text-[var(--text-secondary)]">USDT/SOL</span>
+                    <span id="usdt-sol-price" class="font-bold">Loading...</span>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Opportunity Log -->
+        <div class="mt-6 card">
+            <div class="flex justify-between items-center mb-4">
+                <h2 class="text-2xl font-semibold text-[var(--accent-pink)]">Bot Activity Log</h2>
+                <button id="clearLog" class="text-sm text-[var(--text-secondary)] hover:text-white">Clear</button>
+            </div>
+            <div id="activityLog" class="space-y-2 h-60 overflow-y-auto bg-[var(--bg-dark)] p-4 rounded-lg">
+                <p class="text-[var(--text-secondary)]">Bot is inactive. Start the bot to see activity.</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // WebSocket connection
+        let socket;
+        let isWalletConnected = false;
+        let isBotRunning = false;
+        let botStatusCheckerInterval;
+        let totalTrades = 0;
+        
+        // Profit tracking by token
+        let profits = {
+            SOL: 0,
+            USDC: 0,
+            USDT: 0
+        };
+        
+        // UI elements
+        const activityLog = document.getElementById('activityLog');
+        const botStatus = document.getElementById('botStatus');
+        const solBalance = document.getElementById('solBalance');
+        const usdcBalance = document.getElementById('usdcBalance');
+        const usdtBalance = document.getElementById('usdtBalance');
+        const solProfit = document.getElementById('solProfit');
+        const usdcProfit = document.getElementById('usdcProfit');
+        const usdtProfit = document.getElementById('usdtProfit');
+        const activeTrades = document.getElementById('activeTrades');
+        const completedTrades = document.getElementById('completedTrades');
+        const startBotBtn = document.getElementById('startBot');
+        const stopBotBtn = document.getElementById('stopBot');
+        const clearLogBtn = document.getElementById('clearLog');
+        
+        // Price elements
+        const priceElements = {
+            'SOL/USDC': document.getElementById('sol-usdc-price'),
+            'SOL/USDT': document.getElementById('sol-usdt-price'),
+            'USDC/SOL': document.getElementById('usdc-sol-price'),
+            'USDT/SOL': document.getElementById('usdt-sol-price')
+        };
+        
+        // Status elements
+        const pairStatusElements = {
+            'SOL/USDC': document.getElementById('sol-usdc-status'),
+            'SOL/USDT': document.getElementById('sol-usdt-status'),
+            'USDC/SOL': document.getElementById('usdc-sol-status'),
+            'USDT/SOL': document.getElementById('usdt-sol-status')
+        };
+
+        // Add a log message to the activity log
+        function addLogMessage(message, type = 'info') {
+            const now = new Date();
+            const timestamp = now.toLocaleTimeString();
+            const logItem = document.createElement('div');
+            
+            // Set color based on message type
+            let colorClass = 'text-[var(--text-secondary)]'; // default
+            if (type === 'success') {
+                colorClass = 'text-green-400';
+            } else if (type === 'error') {
+                colorClass = 'text-red-400';
+            } else if (type === 'warning') {
+                colorClass = 'text-yellow-400';
+            } else if (type === 'trade') {
+                colorClass = 'text-[var(--accent-pink)]';
+            }
+            
+            // Format message with timestamp
+            logItem.innerHTML = `<span class="text-xs opacity-70">[${timestamp}]</span> <span class="${colorClass}">${message}</span>`;
+            
+            // Add to log and scroll to bottom
+            activityLog.appendChild(logItem);
+            activityLog.scrollTop = activityLog.scrollHeight;
+            
+            // Limit log entries (keep last 100)
+            while (activityLog.children.length > 100) {
+                activityLog.removeChild(activityLog.firstChild);
+            }
+        }
+        
+        // Update UI with balance information
+        function updateBalances(balances) {
+            solBalance.textContent = `${(balances.SOL || 0).toFixed(4)} SOL`;
+            usdcBalance.textContent = `${(balances.USDC || 0).toFixed(2)} USDC`;
+            usdtBalance.textContent = `${(balances.USDT || 0).toFixed(2)} USDT`;
+        }
+        
+        async function fetchStatsAndUpdate() {
+    try {
+        const res = await fetch('/api/stats'); // or whatever your endpoint is
+        const data = await res.json();
+
+        profits = {
+            SOL: data.tokenProfits?.SOL || 0,
+            USDC: data.tokenProfits?.USDC || 0,
+            USDT: data.tokenProfits?.USDT || 0
+        };
+
+        document.getElementById('activeTrades').textContent = data.activeTrades ?? 0;
+        document.getElementById('completedTrades').textContent = data.recentTrades?.length ?? 0;
+
+        updateProfits(); // ✅ update the DOM
+    } catch (err) {
+        console.error('Failed to fetch stats:', err);
+    }
+}
+
+        // Update profit display
+        function updateProfits() {
+            solProfit.textContent = `${profits.SOL.toFixed(6)} SOL`;
+            usdcProfit.textContent = `${profits.USDC.toFixed(2)} USDC`;
+            usdtProfit.textContent = `${profits.USDT.toFixed(2)} USDT`;
+            
+            // Update class based on profit value
+            solProfit.className = profits.SOL > 0 ? 'font-bold text-green-400' : 
+                                 profits.SOL < 0 ? 'font-bold text-red-400' : 
+                                 'font-bold text-[var(--text-secondary)]';
+                                 
+            usdcProfit.className = profits.USDC > 0 ? 'font-bold text-green-400' : 
+                                 profits.USDC < 0 ? 'font-bold text-red-400' : 
+                                 'font-bold text-[var(--text-secondary)]';
+                                 
+            usdtProfit.className = profits.USDT > 0 ? 'font-bold text-green-400' : 
+                                 profits.USDT < 0 ? 'font-bold text-red-400' : 
+                                 'font-bold text-[var(--text-secondary)]';
+        }
+        
+        // Update price display
+        function updatePrices(prices) {
+            for (const [pair, element] of Object.entries(priceElements)) {
+                if (prices[pair]) {
+                    element.textContent = prices[pair].price.toFixed(6);
+                    element.classList.remove('animate-pulse');
+                }
+            }
+        }
+        
+        // Update trading pair status
+        function updatePairStatus(active = false) {
+            for (const [pair, element] of Object.entries(pairStatusElements)) {
+                element.textContent = active ? 'Active' : 'Inactive';
+                element.className = active ? 'text-green-400 font-bold text-sm' : 'text-yellow-400 font-bold text-sm';
+            }
+        }
+        
+        // Update recent trades display
+        function updateRecentTrades(trades) {
+            const tradesContainer = document.getElementById('recentTrades');
+            
+            if (trades && trades.length > 0) {
+                tradesContainer.innerHTML = '';
+                
+                trades.forEach(trade => {
+                    const isPositive = trade.profit > 0;
+                    const tradeEl = document.createElement('div');
+                    tradeEl.className = 'flex justify-between items-center p-2 border-b border-gray-700';
+                    
+                    // Format timestamp
+                    const tradeDate = new Date(trade.timestamp);
+                    const timeString = tradeDate.toLocaleTimeString();
+                    
+                    // Get token for profit
+                    const token = trade.token || 'SOL';
+                    
+                    tradeEl.innerHTML = `
+                        <div>
+                            <div class="font-medium">${trade.pair || 'Unknown'}</div>
+                            <div class="text-xs text-[var(--text-secondary)]">${timeString}</div>
+                        </div>
+                        <span class="font-bold ${isPositive ? 'text-green-400' : 'text-red-400'}">
+                            ${isPositive ? '+' : ''}${trade.profit.toFixed(6)} ${token}
+                        </span>
+                    `;
+                    
+                    tradesContainer.appendChild(tradeEl);
+                });
+                
+                // Update completed trades counter
+                completedTrades.textContent = totalTrades;
+            } else {
+                tradesContainer.innerHTML = '<p class="text-[var(--text-secondary)] text-center">No recent trades</p>';
+            }
+        }
+        
+        // Initialize WebSocket connection
+        function initWebSocket() {
+            // Get host from current URL
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const host = window.location.host;
+            const wsUrl = `${protocol}//${host}`;
+            
+            console.log(`Connecting to WebSocket at ${wsUrl}`);
+            socket = new WebSocket(wsUrl);
+
+            socket.onopen = () => {
+                console.log('WebSocket Connected');
+                document.getElementById('socketStatus').innerHTML = '🟢 Connected';
+                document.getElementById('socketStatus').classList.remove('text-yellow-400');
+                document.getElementById('socketStatus').classList.add('text-green-400');
+                addLogMessage('Connected to server', 'success');
+                
+                // Send health check every 30 seconds
+                setInterval(() => {
+                    if (socket && socket.readyState === WebSocket.OPEN) {
+                        socket.send(JSON.stringify({ type: 'health_check' }));
+                    }
+                }, 30000);
+            };
+
+            socket.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    handleWebSocketMessage(data);
+                } catch (error) {
+                    console.error('WebSocket message error:', error);
+                    addLogMessage(`Error processing message: ${error.message}`, 'error');
+                }
+            };
+
+            socket.onclose = () => {
+                console.log('WebSocket Disconnected');
+                document.getElementById('socketStatus').innerHTML = '🔴 Disconnected';
+                document.getElementById('socketStatus').classList.remove('text-green-400');
+                document.getElementById('socketStatus').classList.add('text-red-400');
+                
+                // Update bot status
+                botStatus.textContent = 'Offline';
+                botStatus.className = 'font-bold text-red-400';
+                
+                // Disable buttons
+                startBotBtn.disabled = true;
+                startBotBtn.classList.add('btn-disabled');
+                stopBotBtn.disabled = true;
+                stopBotBtn.classList.add('btn-disabled');
+                
+                // Add log message
+                addLogMessage('Disconnected from server', 'error');
+                
+                // Attempt reconnection after 5 seconds
+                setTimeout(initWebSocket, 5000);
+            };
+            
+            socket.onerror = (error) => {
+                console.error('WebSocket Error:', error);
+                addLogMessage('Connection error', 'error');
+            };
+        }
+
+        function handleWebSocketMessage(data) {
+            console.log('Received message:', data.type);
+            
+            // Handle different types of messages
+            switch(data.type) {
+                case 'wallet_state':
+                    updateWalletState(data.data);
+                    break;
+                    
+                case 'wallet_connected':
+                    updateWalletConnection(data.publicKey);
+                    break;
+                    
+                case 'balance_update':
+                    updateBalances(data.balances);
+                    addLogMessage('Wallet balances updated', 'info');
+                    break;
+                    
+                case 'bot_status':
+                    updateBotStatus(data.status);
+                    break;
+                    
+                case 'price_update':
+                    updatePrices(data.prices);
+                    break;
+                    
+                case 'opportunities_found':
+                    handleOpportunities(data);
+                    break;
+                    
+                case 'trade_started':
+                    addLogMessage(`Starting trade: ${data.pair} for ${data.amount.toFixed(6)} tokens`, 'trade');
+                    activeTrades.textContent = parseInt(activeTrades.textContent) + 1;
+                    break;
+                    
+                case 'trade_completed':
+                    handleTradeCompletion(data);
+                    activeTrades.textContent = Math.max(0, parseInt(activeTrades.textContent) - 1);
+                    break;
+                    
+                case 'trade_update':
+                case 'bot_state_update':
+                    updateBotState(data);
+                    break;
+                    
+                case 'trade_discovery':
+                    // When bot discovers trading pairs
+                    addLogMessage(`Found ${data.pairs.length} trading pairs`, 'info');
+                    break;
+                    
+                case 'profit_update':
+                    updateProfitsByToken(data.profits);
+                    break;
+                    
+                case 'health_status':
+                    // Silent handler for health checks
+                    break;
+                    
+                default:
+                    console.log('Unhandled message:', data);
+            }
+        }
+
+        function updateWalletState(walletData) {
+            if (walletData.connected) {
+                isWalletConnected = true;
+                const shortAddress = `${walletData.publicKey.substring(0, 6)}...${walletData.publicKey.substring(walletData.publicKey.length - 4)}`;
+                document.getElementById('walletAddress').textContent = `Wallet: ${shortAddress}`;
+                
+                // Enable start bot button
+                startBotBtn.disabled = false;
+                startBotBtn.classList.remove('btn-disabled');
+                
+                addLogMessage('Wallet connected', 'success');
+            }
+        }
+
+        function updateWalletConnection(publicKey) {
+            isWalletConnected = true;
+            const shortAddress = `${publicKey.substring(0, 6)}...${publicKey.substring(publicKey.length - 4)}`;
+            document.getElementById('walletAddress').textContent = `Wallet: ${shortAddress}`;
+            
+            // Enable start bot button
+            startBotBtn.disabled = false;
+            startBotBtn.classList.remove('btn-disabled');
+            
+            addLogMessage('Wallet connected successfully', 'success');
+        }
+
+        function updateBotStatus(status) {
+            isBotRunning = status === 'running';
+            
+            // Update status display
+            botStatus.textContent = isBotRunning ? 'Running' : 'Stopped';
+            botStatus.className = isBotRunning ? 'font-bold text-green-400' : 'font-bold text-red-400';
+            
+            // Update trading pair statuses
+            updatePairStatus(isBotRunning);
+            
+            // Update button states
+            startBotBtn.disabled = isBotRunning;
+            startBotBtn.classList.toggle('btn-disabled', isBotRunning);
+            
+            stopBotBtn.disabled = !isBotRunning;
+            stopBotBtn.classList.toggle('btn-disabled', !isBotRunning);
+            
+            // Add log message
+            if (isBotRunning) {
+                addLogMessage('Bot started successfully', 'success');
+                activityLog.innerHTML = ''; // Clear log when starting
+            } else {
+                addLogMessage('Bot stopped', 'warning');
+            }
+        }
+
+        function handleOpportunities(data) {
+            if (data.count > 0) {
+                const opp = data.top;
+                const profitText = opp.potentialProfit.toFixed(6);
+                const percentText = opp.percentChange.toFixed(2);
+                
+                addLogMessage(`Found opportunity: ${opp.pair} (${percentText}%) - est. profit: ${profitText}`, 'info');
+            }
+        }
+
+        function handleTradeCompletion(data) {
+            if (data.success) {
+                const profitText = data.profit.toFixed(6);
+                const tokenType = data.token || 'SOL';
+                
+                addLogMessage(`Trade completed! Profit: ${profitText} ${tokenType}`, 'success');
+                addLogMessage(`Transaction ID: ${data.txid.substring(0, 8)}...`, 'info');
+                
+                // Update token-specific profit
+                if (tokenType === 'SOL') {
+                    profits.SOL += data.profit;
+                } else if (tokenType === 'USDC') {
+                    profits.USDC += data.profit;
+                } else if (tokenType === 'USDT') {
+                    profits.USDT += data.profit;
+                }
+                
+                // Update profit display
+                updateProfits();
+                
+                // Increment total trades counter
+                totalTrades++;
+                completedTrades.textContent = totalTrades;
+            } else {
+                addLogMessage(`Trade failed: ${data.error || 'Unknown error'}`, 'error');
+                activeTrades.textContent = Math.max(0, parseInt(activeTrades.textContent) - 1);
+            }
+        }
+
+        function updateBotState(data) {
+            // Update balances with latest data
+            if (data.totalBalance !== undefined) {
+                solBalance.textContent = `${data.totalBalance.toFixed(4)} SOL`;
+            }
+            
+            // Update active trades
+            if (data.activeTrades !== undefined) {
+                activeTrades.textContent = data.activeTrades;
+            }
+            
+            // Update recent trades
+            if (data.recentTrades) {
+                updateRecentTrades(data.recentTrades);
+            }
+        }
+        
+        function updateProfitsByToken(profitData) {
+            if (profitData) {
+                // Update our profit tracking
+                if (profitData.SOL !== undefined) profits.SOL = profitData.SOL;
+                if (profitData.USDC !== undefined) profits.USDC = profitData.USDC;
+                if (profitData.USDT !== undefined) profits.USDT = profitData.USDT;
+                
+                // Update display
+                updateProfits();
+            }
+        }
+
+        // Event Listeners
+        document.getElementById('connectWallet').addEventListener('click', () => {
+            if (socket && socket.readyState === WebSocket.OPEN) {
+                socket.send(JSON.stringify({ type: 'connect_wallet' }));
+                addLogMessage('Connecting wallet...', 'info');
+            } else {
+                alert('WebSocket is not connected. Please wait for reconnection.');
+                addLogMessage('Cannot connect wallet - server connection lost', 'error');
+            }
+        });
+
+        document.getElementById('startBot').addEventListener('click', () => {
+            if (socket && socket.readyState === WebSocket.OPEN) {
+                socket.send(JSON.stringify({ type: 'start_bot' }));
+                addLogMessage('Starting trading bot...', 'info');
+            } else {
+                alert('WebSocket is not connected. Please wait for reconnection.');
+                addLogMessage('Cannot start bot - server connection lost', 'error');
+            }
+        });
+        
+        document.getElementById('stopBot').addEventListener('click', () => {
+            if (socket && socket.readyState === WebSocket.OPEN) {
+                socket.send(JSON.stringify({ type: 'stop_bot' }));
+                addLogMessage('Stopping trading bot...', 'info');
+            } else {
+                alert('WebSocket is not connected. Please wait for reconnection.');
+                addLogMessage('Cannot stop bot - server connection lost', 'error');
+            }
+        });
+        
+        document.getElementById('clearLog').addEventListener('click', () => {
+            activityLog.innerHTML = '';
+            addLogMessage('Log cleared', 'info');
+        });
+
+        // Initialize WebSocket on page load
+        window.addEventListener('load', () => {
+            initWebSocket();
+            addLogMessage('Dashboard initialized', 'info');
+            
+            // Start with loading animations for prices
+            for (const element of Object.values(priceElements)) {
+                element.classList.add('animate-pulse');
+            }
+        });
+    </script>
+</body>
+</html>
