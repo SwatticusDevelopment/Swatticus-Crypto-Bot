@@ -6,6 +6,8 @@ const chalk = require('chalk');
 const fetch = require('node-fetch');
 const bs58 = require('bs58');
 const PriceFetcher = require('./priceFetcher');
+const Decimal = require('decimal.js');
+const EnhancedTradingStrategy = require('./enhancedStrategy');
 
 // Load environment variables
 dotenv.config({ path: path.join(__dirname, '..', '.env') });
@@ -17,14 +19,17 @@ class SolanaTradingBot {
         // Enhanced Configuration with defaults
         this.config = {
             rpcEndpoint: process.env.RPC_ENDPOINT || 'https://api.mainnet-beta.solana.com',
-            minProfitPercentage: parseFloat(process.env.MIN_PROFIT_PERCENTAGE) || 0.1, // Lower threshold
-            maxSlippage: parseInt(process.env.MAX_SLIPPAGE_BPS) || 500, // More tolerant of slippage
-            refreshInterval: parseInt(process.env.REFRESH_INTERVAL) || 10000, // Faster refresh
+            minProfitPercentage: parseFloat(process.env.MIN_PROFIT_PERCENTAGE) || 0.08, // Lower threshold
+            maxSlippage: parseInt(process.env.MAX_SLIPPAGE_BPS) || 700, // More tolerant of slippage
+            refreshInterval: parseInt(process.env.REFRESH_INTERVAL) || 8000, // Faster refresh
             initialBalance: parseFloat(process.env.INITIAL_BALANCE) || 0.1,
             dailyProfitTarget: parseFloat(process.env.DAILY_PROFIT_TARGET) || 25.0,
-            minTradeSize: parseFloat(process.env.MIN_TRADE_SIZE) || 0.05,
-            maxConcurrentTrades: parseInt(process.env.MAX_CONCURRENT_TRADES) || 5,
-            aggressiveMode: true // Always use aggressive mode for active trading
+            minTradeSize: parseFloat(process.env.MIN_TRADE_SIZE) || 0.015,
+            maxConcurrentTrades: parseInt(process.env.MAX_CONCURRENT_TRADES) || 15,
+            aggressiveMode: true, // Always use aggressive mode for active trading
+            routingMode: process.env.ROUTING_MODE || 'aggressive',
+            maxPriceDifferencePercent: parseFloat(process.env.MAX_PRICE_DIFFERENCE_PERCENT) || 45,
+            ignorePriceDifference: process.env.IGNORE_PRICE_DIFFERENCE === 'true'
         };
 
         // Token Configurations
@@ -72,6 +77,9 @@ class SolanaTradingBot {
 
         // Price Fetcher with enhanced functionality
         this.priceFetcher = new PriceFetcher(this.TOKEN_ADDRESSES);
+
+        // Initialize enhanced trading strategy
+        this.enhancedStrategy = new EnhancedTradingStrategy(this);
 
         // Initialize bot
         this.initialize();
@@ -128,6 +136,10 @@ class SolanaTradingBot {
         // Create trading opportunity log
         const opportunityLogPath = path.join(logDir, 'opportunities.log');
         fs.writeFileSync(opportunityLogPath, `=== Trading Opportunities Log (${new Date().toISOString()}) ===\n`);
+        
+        // Create enhanced opportunity log
+        const enhancedOpportunityLogPath = path.join(logDir, 'enhanced_opportunities.log');
+        fs.writeFileSync(enhancedOpportunityLogPath, `=== Enhanced Trading Opportunities Log (${new Date().toISOString()}) ===\n`);
     }
 
     async setupConnection() {
@@ -325,6 +337,17 @@ class SolanaTradingBot {
     async findTradingOpportunities(prices) {
         console.log(chalk.blue('Searching for trading opportunities...'));
         
+        // First try the enhanced strategy
+        const enhancedOpportunities = await this.enhancedStrategy.findEnhancedOpportunities(prices);
+        
+        if (enhancedOpportunities && enhancedOpportunities.length > 0) {
+            console.log(chalk.blue(`Found ${enhancedOpportunities.length} enhanced trading opportunities`));
+            return enhancedOpportunities;
+        }
+        
+        // Fall back to original strategy if no enhanced opportunities found
+        console.log(chalk.blue('No enhanced opportunities found, using standard detection...'));
+        
         const opportunities = [];
         
         for (const pair of this.tradingPairs) {
@@ -383,11 +406,11 @@ class SolanaTradingBot {
                 let suggestedAmount;
                 
                 if (inputToken === 'SOL') {
-                    // Use up to 20% of available SOL balance or max 1 SOL
-                    suggestedAmount = Math.min(1.0, availableBalance * 0.2);
+                    // Use smaller amount for SOL to allow more trades
+                    suggestedAmount = Math.min(0.05, availableBalance * 0.25);
                 } else if (inputToken === 'USDC' || inputToken === 'USDT') {
-                    // Use up to 30% of available stablecoin balance or max 100 tokens
-                    suggestedAmount = Math.min(100.0, availableBalance * 0.3);
+                    // Use up to 30% of available stablecoin balance or max 5 tokens
+                    suggestedAmount = Math.min(5.0, availableBalance * 0.3);
                 } else {
                     // For other tokens, use up to 20% of available balance
                     suggestedAmount = Math.min(availableBalance * 0.2, Math.max(this.config.minTradeSize, availableBalance * 0.1));
@@ -443,7 +466,29 @@ class SolanaTradingBot {
             const inputDecimals = this.TOKEN_DECIMALS[inputToken] || 9;
             const inputAmountLamports = Math.floor(amount * Math.pow(10, inputDecimals));
             
-            // Use the fetch function with retry logic for better reliability
+            // Enhanced parameters for better routing
+            const params = new URLSearchParams({
+                inputMint: this.TOKEN_ADDRESSES[inputToken],
+                outputMint: this.TOKEN_ADDRESSES[outputToken],
+                amount: inputAmountLamports.toString(),
+                slippageBps: this.config.maxSlippage.toString(),
+                onlyDirectRoutes: 'false',
+                asLegacyTransaction: 'false',
+                platformFeeBps: '0'
+            });
+            
+            // Add routing mode if specified in config
+            if (this.config.routingMode === 'aggressive') {
+                // This will cause the API to try more routes but might be slightly slower
+                params.append('excludeDexes', '');
+                params.append('computeUnitPriceMicroLamports', '10000'); // Pay more for compute units
+            }
+            
+            const url = `https://quote-api.jup.ag/v6/quote?${params.toString()}`;
+            
+            console.log(chalk.yellow(`Jupiter quote URL: ${url}`));
+            
+            // Use fetch function with retry logic for better reliability
             const fetchWithRetry = async (url, options = {}, maxRetries = 3) => {
                 let lastError;
                 for (let i = 0; i < maxRetries; i++) {
@@ -458,15 +503,11 @@ class SolanaTradingBot {
                         console.error(chalk.yellow(`Fetch attempt ${i + 1}/${maxRetries} failed:`, error.message));
                         lastError = error;
                         // Exponential backoff
-                        await new Promise(resolve => setTimeout(resolve, 1000 * Math.pow(2, i)));
+                        await new Promise(resolve => setTimeout(resolve, 500 * Math.pow(2, i)));
                     }
                 }
                 throw lastError;
             };
-            
-            const url = `https://quote-api.jup.ag/v6/quote?inputMint=${this.TOKEN_ADDRESSES[inputToken]}&outputMint=${this.TOKEN_ADDRESSES[outputToken]}&amount=${inputAmountLamports}&slippageBps=${this.config.maxSlippage}`;
-            
-            console.log(chalk.yellow(`Jupiter quote URL: ${url}`));
             
             const quoteResponse = await fetchWithRetry(url);
             
@@ -475,6 +516,14 @@ class SolanaTradingBot {
                 const outputAmount = parseInt(quoteResponse.outAmount) / Math.pow(10, outputDecimals);
                 
                 console.log(chalk.green(`Quote received: ${amount} ${inputToken} -> ${outputAmount.toFixed(6)} ${outputToken}`));
+                
+                // Log route information if available
+                if (quoteResponse.routePlan && quoteResponse.routePlan.length > 0) {
+                    console.log(chalk.blue('Route details:'));
+                    quoteResponse.routePlan.forEach((hop, index) => {
+                        console.log(`  Hop ${index+1}: ${hop.swapInfo?.label || 'Unknown'} (${hop.percent}%)`);
+                    });
+                }
             }
             
             return quoteResponse;
@@ -488,26 +537,36 @@ class SolanaTradingBot {
         try {
             console.log(chalk.blue(`Preparing to execute swap: ${amount} ${inputToken}...`));
             
-            const inputMint = quoteResponse.inputMint;
-            const inputTokenName = this.getTokenNameByAddress(inputMint) || inputToken;
-            const decimals = this.TOKEN_DECIMALS[inputTokenName] || 9;
+            // Calculate dynamic compute unit settings based on trade size
+            const computeUnits = Math.min(1_000_000, Math.max(300_000, Math.floor(amount * 5_000_000)));
             
-            const amountInSmallestUnit = Math.floor(amount * Math.pow(10, decimals));
+            // IMPORTANT: We'll use either computeUnitPrice OR prioritizationFee, not both
+            // This was causing the Jupiter API error
             
-            console.log(chalk.yellow(`Sending swap request to Jupiter API...`));
+            console.log(chalk.yellow(`Sending swap request to Jupiter API with ${computeUnits} compute units...`));
+            
+            const swapRequest = {
+                userPublicKey: this.state.wallet.publicKey.toString(),
+                wrapUnwrapSOL: true,
+                useVersionedTransaction: true,
+                dynamicComputeUnitLimit: true,
+                slippageBps: this.config.maxSlippage,
+                quoteResponse // <- use it exactly as received
+            };
+            
+            // Add EITHER compute unit price OR prioritization fee based on config
+            if (this.config.routingMode === 'aggressive') {
+                // Use compute unit price for aggressive mode
+                swapRequest.computeUnitPriceMicroLamports = 10000;
+            } else {
+                // Use prioritization fee for normal mode
+                swapRequest.prioritizationFeeLamports = 10000; // 0.00001 SOL priority fee
+            }
             
             const response = await fetch('https://quote-api.jup.ag/v6/swap', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    userPublicKey: this.state.wallet.publicKey.toString(),
-                    wrapUnwrapSOL: true,
-                    useVersionedTransaction: true,
-                    computeUnitPriceMicroLamports: 10000,
-                    dynamicComputeUnitLimit: true,
-                    slippageBps: this.config.maxSlippage,
-                    quoteResponse // <- use it exactly as received
-                })
+                body: JSON.stringify(swapRequest)
             });
             
             if (!response.ok) {
@@ -525,15 +584,6 @@ class SolanaTradingBot {
             
             console.log(chalk.green('Swap transaction prepared by Jupiter. Proceeding with signing and sending...'));
             
-            // Log everything for debugging
-            console.log(chalk.yellow('Swap transaction details:'), {
-                inputToken,
-                amount: amount.toString(),
-                walletPublicKey: this.state.wallet.publicKey.toString(),
-                hasSwapTransaction: !!swapResponse.swapTransaction,
-                swapTransactionLength: swapResponse.swapTransaction ? swapResponse.swapTransaction.length : 0
-            });
-            
             const transactionBuffer = Buffer.from(swapResponse.swapTransaction, 'base64');
             const transaction = VersionedTransaction.deserialize(transactionBuffer);
             
@@ -543,13 +593,37 @@ class SolanaTradingBot {
             
             console.log(chalk.yellow('Transaction signed. Sending to Solana...'));
             
-            const txid = await this.state.connection.sendTransaction(transaction, {
-                skipPreflight: false, // Enable preflight for better error checking
-                maxRetries: 3,
-                preflightCommitment: 'confirmed'
-            });
+            // Set up retry logic for sending transaction
+            let txid = null;
+            let retriesLeft = 3;
             
-            console.log(chalk.green(`Transaction sent: ${txid}`));
+            while (retriesLeft > 0 && !txid) {
+                try {
+                    txid = await this.state.connection.sendTransaction(transaction, {
+                        skipPreflight: false, // Enable preflight for better error checking
+                        maxRetries: 3,
+                        preflightCommitment: 'confirmed'
+                    });
+                    
+                    console.log(chalk.green(`Transaction sent: ${txid}`));
+                    break;
+                } catch (sendError) {
+                    retriesLeft--;
+                    console.error(chalk.yellow(`Error sending transaction (${retriesLeft} retries left):`, sendError.message));
+                    
+                    if (retriesLeft <= 0) {
+                        throw sendError;
+                    }
+                    
+                    // Wait before retry with exponential backoff
+                    await new Promise(resolve => setTimeout(resolve, 1000 * Math.pow(2, 3 - retriesLeft)));
+                }
+            }
+            
+            if (!txid) {
+                throw new Error('Failed to send transaction after multiple retries');
+            }
+            
             console.log(chalk.yellow('Waiting for confirmation...'));
             
             try {
@@ -633,6 +707,12 @@ class SolanaTradingBot {
     }
 
     async executeTradeOpportunity(opportunity) {
+        // Use enhanced execution if available
+        if (this.enhancedStrategy) {
+            return await this.enhancedStrategy.executeBestOpportunity([opportunity]);
+        }
+        
+        // Fall back to original execution code
         try {
             console.log(chalk.yellow('=== Executing trade opportunity ==='));
             console.log(`Pair: ${opportunity.pair}`);
@@ -674,8 +754,10 @@ class SolanaTradingBot {
                 `Quote analysis: Market Price = ${marketPrice.toFixed(6)}, History Price = ${opportunity.currentPrice.toFixed(6)}, Diff = ${profitPercentFromTrend.toFixed(2)}%`
             ));
     
-            if (profitPercentFromTrend < -2.0) {
-                console.log(chalk.red(`Quote not profitable due to slippage. Aborting.`));
+            // Skip if the price difference exceeds our threshold and we're not ignoring differences
+            if (profitPercentFromTrend < -2.0 && !this.config.ignorePriceDifference && 
+                Math.abs(profitPercentFromTrend) > this.config.maxPriceDifferencePercent) {
+                console.log(chalk.red(`Quote not profitable due to excessive slippage. Aborting.`));
                 return false;
             }
     
@@ -771,6 +853,11 @@ class SolanaTradingBot {
             txid: tradeResult.txid
         };
     
+        // Record profit in enhanced strategy if available
+        if (this.enhancedStrategy) {
+            this.enhancedStrategy.recordProfit(solProfit, timestamp);
+        }
+        
         // Add to history
         this.state.tradeHistory.push(tradeRecord);
         if (this.state.tradeHistory.length > 50) {
@@ -784,8 +871,17 @@ class SolanaTradingBot {
         this.checkProfitTarget();
     }
     
+    checkProfitTarget() {
+        // Check if we've hit our daily profit target
+        if (this.state.dailyProfit >= this.config.dailyProfitTarget && !this.config.aggressiveMode) {
+            console.log(chalk.green(`Daily profit target of ${this.config.dailyProfitTarget} SOL reached! (${this.state.dailyProfit.toFixed(6)} SOL)`));
+            console.log(chalk.yellow('Disabling trading for the rest of the day. Use aggressiveMode=true to keep trading.'));
+            this.state.tradingEnabled = false;
+        }
+    }
+    
     async start() {
-        console.log(chalk.blue('Starting Solana Trading Bot in LIVE TRADING mode'));
+        console.log(chalk.blue('Starting Solana Trading Bot in HIGH FREQUENCY mode'));
         
         // Initial token balance check
         await this.getTokenBalances();
@@ -799,9 +895,9 @@ class SolanaTradingBot {
             console.log(chalk.blue('Daily profit counter reset for new day'));
         }
         
-        // Tracking variables
+        // More aggressive tracking variables
         let lastTradeTime = 0;
-        const minTradeInterval = 20000; // 20 seconds minimum between trades (more aggressive)
+        const minTradeInterval = 5000; // 5 seconds minimum between trades
         
         // Create detailed logs directory if it doesn't exist
         const logDir = path.join(__dirname, 'logs');
@@ -836,14 +932,18 @@ class SolanaTradingBot {
                 if (opportunities.length > 0 && 
                     this.state.activeTrades < this.config.maxConcurrentTrades) {
                     
-                    // Sort opportunities by potential profit
-                    opportunities.sort((a, b) => b.potentialProfit - a.potentialProfit);
+                    // Sort opportunities by confidence * potential profit
+                    opportunities.sort((a, b) => {
+                        const aValue = (a.confidence || 50) * a.potentialProfit;
+                        const bValue = (b.confidence || 50) * b.potentialProfit;
+                        return bValue - aValue;
+                    });
                     
                     const bestOpportunity = opportunities[0];
                     console.log(chalk.blue(`Processing best trading opportunity: ${bestOpportunity.pair} (${bestOpportunity.percentChange.toFixed(2)}% change)`));
                     
-                    // Skip small opportunities
-                    if (bestOpportunity.potentialProfit < 0.0005) {
+                    // Skip very small opportunities
+                    if (bestOpportunity.potentialProfit < 0.0002) {
                         console.log(chalk.yellow(`Skipping low profit opportunity: ${bestOpportunity.potentialProfit.toFixed(6)} ${bestOpportunity.outputToken}`));
                         return;
                     }
@@ -866,9 +966,9 @@ class SolanaTradingBot {
                     console.log(chalk.yellow('No profitable trading opportunities found this cycle'));
                     
                     // Periodically update balances even without trades
-                    if (currentTime - lastTradeTime > 300000) { // 5 minutes
+                    if (currentTime - lastTradeTime > 120000) { // 2 minutes
                         await this.getTokenBalances();
-                        lastTradeTime = currentTime - 290000; // Reset timer but don't fully reset
+                        lastTradeTime = currentTime - 110000; // Reset timer but don't fully reset
                     }
                 }
             } catch (error) {
@@ -890,6 +990,21 @@ class SolanaTradingBot {
         // Store interval for potential cleanup
         this.state.tradingInterval = tradingInterval;
         
+        // Add additional price monitoring interval (higher frequency for volatility detection)
+        this.state.priceMonitorInterval = setInterval(async () => {
+            try {
+                if (this.enhancedStrategy) {
+                    // Quick price check for volatility detection only
+                    const prices = await this.priceFetcher.getPrices(this.tradingPairs);
+                    
+                    // Just update the strategy's price tracking without full opportunity scan
+                    this.enhancedStrategy.updatePriceTracking(prices);
+                }
+            } catch (error) {
+                console.error(chalk.yellow('Price monitor error:'), error);
+            }
+        }, 3000); // Check prices every 3 seconds
+        
         // Add additional status check interval
         this.state.statusInterval = setInterval(() => {
             // Check wallet connection and RPC connection are still active
@@ -904,6 +1019,10 @@ class SolanaTradingBot {
     stop() {
         if (this.state.tradingInterval) {
             clearInterval(this.state.tradingInterval);
+        }
+        
+        if (this.state.priceMonitorInterval) {
+            clearInterval(this.state.priceMonitorInterval);
         }
         
         if (this.state.statusInterval) {
@@ -926,12 +1045,11 @@ class SolanaTradingBot {
             totalProfit: this.state.totalProfit,
             activeTrades: this.state.activeTrades,
             recentTrades: this.state.tradeHistory.slice(-5),
-            tokenProfits: this.state.tokenProfits || { SOL: 0, USDC: 0, USDT: 0 }
+            tokenProfits: this.state.tokenProfits || { SOL: 0, USDC: 0, USDT: 0 },
+            hourlyProfit: this.enhancedStrategy ? this.enhancedStrategy.recentProfit : null
         };
     }    
 }
-
-
 
 // Export the trading bot class
 module.exports = SolanaTradingBot;
