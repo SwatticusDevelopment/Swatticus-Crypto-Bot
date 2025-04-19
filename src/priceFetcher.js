@@ -5,6 +5,8 @@ const path = require('path');
 const chalk = require('chalk');
 const rpcConfig = require('./rpc-config');
 
+
+
 /**
  * Optimized PriceFetcher class for production trading
  * - Ultra-low latency price fetching with multiple failovers
@@ -17,7 +19,8 @@ class PriceFetcher {
         console.log(chalk.blue('🚀 Initializing optimized PriceFetcher for high-frequency trading...'));
         
         this.TOKEN_ADDRESSES = tokenAddresses;
-        this.CACHE_DURATION = 5 * 1000; // 5 second cache for ultra-responsive trading
+        // Increase cache duration to reduce API calls
+        this.CACHE_DURATION = 15 * 1000; // 15 second cache for reduced rate limiting issues
         this.priceCache = {};
         this.lastFetchTime = 0;
         this.fetchCount = 0;
@@ -36,29 +39,56 @@ class PriceFetcher {
             'mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So': 158   // mSOL - more realistic
         };
         
-        // API Keys - can be updated with your own
-        this.API_KEYS = {
-            birdeye: 'f9ff6430db3a42bea9638a7a5c089240', // Standard API key
-            coinmarketcap: '', // Optional - add your own
-            geckoterminal: '' // Optional - add your own
+        // Rate limiting settings
+        this.rateLimits = {
+            // Map of API endpoints to rate limit configurations
+            'api.coingecko.com': {
+                requestsPerMinute: 10,
+                burstLimit: 5,
+                tokens: 5, // Current token count (token bucket algorithm)
+                lastRefill: Date.now(),
+                minDelayBetweenRequests: 6000 // 6 seconds minimum between requests
+            },
+            'api.birdeye.so': {
+                requestsPerMinute: 10,
+                burstLimit: 5,
+                tokens: 5,
+                lastRefill: Date.now(),
+                minDelayBetweenRequests: 6000
+            },
+            'price.jup.ag': {
+                requestsPerMinute: 20, 
+                burstLimit: 10,
+                tokens: 10,
+                lastRefill: Date.now(),
+                minDelayBetweenRequests: 3000 // 3 seconds minimum
+            },
+            'api.kucoin.com': {
+                requestsPerMinute: 20,
+                burstLimit: 10,
+                tokens: 10,
+                lastRefill: Date.now(),
+                minDelayBetweenRequests: 3000
+            },
+            // Default for any other endpoints
+            'default': {
+                requestsPerMinute: 10,
+                burstLimit: 5,
+                tokens: 5,
+                lastRefill: Date.now(),
+                minDelayBetweenRequests: 5000
+            }
         };
         
-        // Data sources priority (optimized ordering)
-        this.dataSources = [
-            { name: 'Jupiter', method: this.fetchJupiterPrices.bind(this), weight: 10 },
-            { name: 'Birdeye', method: this.fetchBirdeyePrices.bind(this), weight: 9 },
-            { name: 'Raydium', method: this.fetchRaydiumPrices.bind(this), weight: 8 },
-            { name: 'OpenBook', method: this.fetchOpenbookPrices.bind(this), weight: 7 },
-            { name: 'CoinGecko', method: this.fetchCoinGeckoPrices.bind(this), weight: 5 },
-            { name: 'Kucoin', method: this.fetchKucoinPrices.bind(this), weight: 4 }
-        ];
+        // Last time we used each API to track rate limits
+        this.lastRequestTimes = {};
         
         // Setup log directory
         this.setupLogs();
         
-        console.log(chalk.green('✅ PriceFetcher initialized with 5-second refresh for real-time trading'));
+        console.log(chalk.green('✅ PriceFetcher initialized with 15-second refresh rate and improved rate limiting'));
         
-        // Start background price monitoring
+        // Start background price monitoring at a reduced frequency
         this.startBackgroundMonitoring();
     }
     
@@ -106,6 +136,20 @@ class PriceFetcher {
         // Start a background process to continuously update prices
         this.backgroundMonitor = setInterval(async () => {
             try {
+                // Check if dataSources is defined and is iterable before using it
+                if (!this.dataSources || !Array.isArray(this.dataSources)) {
+                    // Define a fallback data source array if missing
+                    this.dataSources = [
+                        { name: 'Jupiter', method: this.fetchJupiterPrices.bind(this), weight: 10 },
+                        { name: 'Birdeye', method: this.fetchBirdeyePrices.bind(this), weight: 9 },
+                        { name: 'Raydium', method: this.fetchRaydiumPrices.bind(this), weight: 8 },
+                        { name: 'OpenBook', method: this.fetchOpenbookPrices.bind(this), weight: 7 },
+                        { name: 'CoinGecko', method: this.fetchCoinGeckoPrices.bind(this), weight: 5 },
+                        { name: 'Kucoin', method: this.fetchKucoinPrices.bind(this), weight: 4 }
+                    ];
+                    console.log(chalk.blue('Re-initialized dataSources for background price monitoring'));
+                }
+                
                 // Silently update prices in the background
                 await this.fetchPrices(true);
                 
@@ -113,11 +157,13 @@ class PriceFetcher {
                 this.checkForSignificantEvents();
             } catch (error) {
                 console.error(chalk.yellow('Background price monitor error:'), error.message);
+                console.error(chalk.yellow('Stack trace:'), error.stack);
             }
-        }, 10000); // Every 10 seconds
+        }, 30000); // Every 30 seconds instead of 10
         
-        console.log(chalk.blue('📊 Background price monitoring started'));
+        console.log(chalk.blue('📊 Background price monitoring started (30s interval)'));
     }
+    
     
     checkForSignificantEvents() {
         // Look through recent price history for volatility or trends
@@ -165,110 +211,185 @@ class PriceFetcher {
         }
     }
 
-    async httpsGetWithRetryAndRateLimit(options, retries = 3, timeout = 6000) {
+    async httpsGetWithRetryAndRateLimit(options, retries = 3, timeout = 10000) {
+        // Extract the hostname for rate limiting
+        const hostname = options.hostname;
+        
+        // Apply rate limiting
+        await this.applyRateLimit(hostname);
+        
+        // Use exponential backoff starting at 1000ms (more conservative)
+        const getBackoff = (attempt) => Math.min(15000, 1000 * Math.pow(2, attempt));
+        
         // Implement a delay between API requests to prevent rate limiting
         const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
         
-        // Use exponential backoff starting at 500ms
-        const getBackoff = (attempt) => Math.min(10000, 500 * Math.pow(1.5, attempt));
-        
         return new Promise(async (resolve, reject) => {
-          let attempt = 0;
-          
-          while (attempt < retries) {
-            try {
-              // Add a delay between attempts with exponential backoff
-              if (attempt > 0) {
-                const backoff = getBackoff(attempt);
-                console.log(`Attempt ${attempt+1}/${retries} after ${backoff}ms delay...`);
-                await delay(backoff);
-              }
-              
-              // Use the httpAgent for persistent connections
-              const requestOptions = {
-                ...options,
-                timeout: timeout,
-                agent: rpcConfig.httpsAgent
-              };
-              
-              // Add random delay to prevent synchronized rate limits
-              await delay(Math.random() * 200);
-              
-              const response = await new Promise((resolve, reject) => {
-                const req = https.get(requestOptions, (res) => {
-                  // Handle redirects
-                  if (res.statusCode === 301 || res.statusCode === 302) {
-                    if (res.headers.location) {
-                      // Follow redirect
-                      const redirectUrl = new URL(res.headers.location);
-                      const redirectOptions = {
-                        ...requestOptions,
-                        hostname: redirectUrl.hostname,
-                        path: redirectUrl.pathname + redirectUrl.search
-                      };
-                      
-                      this.httpsGetWithRetryAndRateLimit(redirectOptions, retries - attempt - 1, timeout)
-                        .then(resolve)
-                        .catch(reject);
-                      return;
+            let attempt = 0;
+            
+            while (attempt < retries) {
+                try {
+                    // Add a delay between attempts with exponential backoff
+                    if (attempt > 0) {
+                        const backoff = getBackoff(attempt);
+                        console.log(`Attempt ${attempt+1}/${retries} after ${backoff}ms delay...`);
+                        await delay(backoff);
                     }
-                  }
-                  
-                  // Handle rate limiting
-                  if (res.statusCode === 429) {
-                    // Extract retry-after header if available
-                    const retryAfter = parseInt(res.headers['retry-after'] || '1', 10);
-                    const retryDelay = retryAfter * 1000 || getBackoff(attempt);
                     
-                    console.log(`Rate limited (429). Retry after ${retryDelay}ms`);
+                    // Use the httpAgent for persistent connections
+                    const requestOptions = {
+                        ...options,
+                        timeout: timeout,
+                        headers: {
+                            ...options.headers,
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                        }
+                    };
                     
-                    // Consume the response data to free the socket
-                    let data = '';
-                    res.on('data', chunk => { data += chunk; });
-                    res.on('end', () => {
-                      reject(new Error(`Rate limited: ${data}`));
+                    // Add random delay to prevent synchronized rate limits
+                    await delay(Math.random() * 500);
+                    
+                    const response = await new Promise((resolve, reject) => {
+                        const req = https.get(requestOptions, (res) => {
+                            // Handle rate limiting response
+                            if (res.statusCode === 429) {
+                                // Extract retry-after header if available
+                                const retryAfter = parseInt(res.headers['retry-after'] || '2', 10);
+                                const retryDelay = retryAfter * 1000 || getBackoff(attempt);
+                                
+                                console.log(`Server responded with 429 Too Many Requests. Retrying after ${retryDelay}ms delay...`);
+                                
+                                // Update rate limiting for this hostname
+                                this.updateRateLimitAfter429(hostname);
+                                
+                                // Consume the response data to free the socket
+                                let data = '';
+                                res.on('data', chunk => { data += chunk; });
+                                res.on('end', () => {
+                                    reject(new Error(`Rate limited: ${data}`));
+                                });
+                                return;
+                            }
+                            
+                            // Handle redirects
+                            if (res.statusCode === 301 || res.statusCode === 302) {
+                                if (res.headers.location) {
+                                    // Extracted redirect URL
+                                    const redirectUrl = new URL(res.headers.location);
+                                    
+                                    // Apply rate limiting for the new hostname too
+                                    this.applyRateLimit(redirectUrl.hostname);
+                                    
+                                    const redirectOptions = {
+                                        ...requestOptions,
+                                        hostname: redirectUrl.hostname,
+                                        path: redirectUrl.pathname + redirectUrl.search
+                                    };
+                                    
+                                    this.httpsGetWithRetryAndRateLimit(redirectOptions, retries - attempt - 1, timeout)
+                                        .then(resolve)
+                                        .catch(reject);
+                                    return;
+                                }
+                            }
+                            
+                            // Handle successful response
+                            let data = '';
+                            res.on('data', chunk => { data += chunk; });
+                            res.on('end', () => {
+                                if (res.statusCode >= 200 && res.statusCode < 300) {
+                                    try {
+                                        resolve(JSON.parse(data));
+                                    } catch (error) {
+                                        reject(new Error(`Failed to parse response: ${error.message}`));
+                                    }
+                                } else {
+                                    reject(new Error(`HTTP error ${res.statusCode}: ${data}`));
+                                }
+                            });
+                        });
+                        
+                        req.on('error', reject);
+                        req.on('timeout', () => {
+                            req.destroy();
+                            reject(new Error(`Request timed out after ${timeout}ms`));
+                        });
                     });
-                    return;
-                  }
-                  
-                  // Handle successful response
-                  let data = '';
-                  res.on('data', chunk => { data += chunk; });
-                  res.on('end', () => {
-                    if (res.statusCode >= 200 && res.statusCode < 300) {
-                      try {
-                        resolve(JSON.parse(data));
-                      } catch (error) {
-                        reject(new Error(`Failed to parse response: ${error.message}`));
-                      }
-                    } else {
-                      reject(new Error(`HTTP error ${res.statusCode}: ${data}`));
+                    
+                    return resolve(response);
+                } catch (error) {
+                    attempt++;
+                    
+                    // If this was the last attempt, reject
+                    if (attempt >= retries) {
+                        return reject(error);
                     }
-                  });
-                });
-                
-                req.on('error', reject);
-                req.on('timeout', () => {
-                  req.destroy();
-                  reject(new Error(`Request timed out after ${timeout}ms`));
-                });
-              });
-              
-              return resolve(response);
-            } catch (error) {
-              attempt++;
-              
-              // If this was the last attempt, reject
-              if (attempt >= retries) {
-                return reject(error);
-              }
-              
-              // Otherwise continue to next attempt
-              console.error(`Request failed (attempt ${attempt}/${retries}): ${error.message}`);
+                    
+                    // Otherwise continue to next attempt
+                    console.error(`Request failed (attempt ${attempt}/${retries}): ${error.message}`);
+                }
             }
-          }
         });
-      }
+    }
+    
+    async applyRateLimit(hostname) {
+        // Get rate limit config for this hostname or use default
+        const rateLimitConfig = this.rateLimits[hostname] || this.rateLimits['default'];
+        
+        // Check when we last made a request to this hostname
+        const lastRequestTime = this.lastRequestTimes[hostname] || 0;
+        const now = Date.now();
+        const timeSinceLastRequest = now - lastRequestTime;
+        
+        // Enforce minimum delay between requests
+        if (timeSinceLastRequest < rateLimitConfig.minDelayBetweenRequests) {
+            const delayNeeded = rateLimitConfig.minDelayBetweenRequests - timeSinceLastRequest;
+            // Add some jitter to prevent synchronized requests
+            const jitter = Math.random() * 200;
+            await new Promise(resolve => setTimeout(resolve, delayNeeded + jitter));
+        }
+        
+        // Update the last request time
+        this.lastRequestTimes[hostname] = Date.now();
+        
+        // Refill token bucket based on time passed
+        const timeSinceLastRefill = (now - rateLimitConfig.lastRefill) / 1000; // in seconds
+        const tokensToAdd = Math.floor(timeSinceLastRefill * (rateLimitConfig.requestsPerMinute / 60));
+        
+        if (tokensToAdd > 0) {
+            rateLimitConfig.tokens = Math.min(rateLimitConfig.burstLimit, rateLimitConfig.tokens + tokensToAdd);
+            rateLimitConfig.lastRefill = now;
+        }
+        
+        // If we're out of tokens, wait until we have one
+        if (rateLimitConfig.tokens < 1) {
+            // Calculate time until next token
+            const timeUntilNextToken = (1 / (rateLimitConfig.requestsPerMinute / 60)) * 1000; // in ms
+            await new Promise(resolve => setTimeout(resolve, timeUntilNextToken));
+            
+            // Add a token
+            rateLimitConfig.tokens = 1;
+            rateLimitConfig.lastRefill = Date.now();
+        }
+        
+        // Consume a token
+        rateLimitConfig.tokens--;
+    }
+
+    updateRateLimitAfter429(hostname) {
+        // Get rate limit config for this hostname or use default
+        const rateLimitConfig = this.rateLimits[hostname] || this.rateLimits['default'];
+        
+        // Make rate limiting more conservative
+        rateLimitConfig.minDelayBetweenRequests *= 1.5; // Increase delay
+        rateLimitConfig.requestsPerMinute = Math.max(5, Math.floor(rateLimitConfig.requestsPerMinute * 0.75)); // Reduce rate
+        
+        // Set tokens to 0 to force waiting
+        rateLimitConfig.tokens = 0;
+        rateLimitConfig.lastRefill = Date.now();
+        
+        console.log(chalk.yellow(`Rate limit exceeded for ${hostname}. Adjusted limits to ${rateLimitConfig.requestsPerMinute} requests/min, minimum delay ${Math.round(rateLimitConfig.minDelayBetweenRequests)}ms`));
+    }
 
     // Enhanced HTTPS fetch with timeout, retries and circuit breaker
     async httpsGetWithRetry(options, retries = 3, timeout = 3000) { // 3 second timeout for faster fallback

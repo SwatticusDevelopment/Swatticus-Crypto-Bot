@@ -16,35 +16,57 @@ const fs = require('fs');
 const path = require('path');
 
 class EnhancedTradingStrategy {
-    constructor(tradingBot) {
-        this.bot = tradingBot;
-        this.previousPrices = {};
-        this.priceMovementData = {};
-        this.lastOpportunityCheck = 0;
+  constructor(tradingBot) {
+    this.bot = tradingBot;
+    this.previousPrices = {};
+    this.priceMovementData = {};
+    this.lastOpportunityCheck = 0;
+    
+    // Import config from environment or use defaults
+    this.minMovementThreshold = parseFloat(process.env.MIN_MOVEMENT_THRESHOLD) || 0.04;
+    this.highValuePairs = (process.env.HIGH_VALUE_PAIRS || 'SOL/USDC,SOL/USDT,USDC/SOL,USDT/SOL').split(',');
+    
+    // Transaction fee estimation (in SOL)
+    this.transactionFee = 0.000005;
+    
+    // IMPROVED WALLET VERIFICATION - MULTI-LEVEL CHECKS
+    if (!this.bot.state || !this.bot.state.wallet) {
+        console.error(chalk.red('ERROR: Wallet not configured in TradingBot'));
         
-        // Import config from environment or use defaults
-        this.minMovementThreshold = parseFloat(process.env.MIN_MOVEMENT_THRESHOLD) || 0.04;
-        this.highValuePairs = (process.env.HIGH_VALUE_PAIRS || 'SOL/USDC,SOL/USDT,USDC/SOL,USDT/SOL').split(',');
-        
-        // Transaction fee estimation (in SOL)
-        this.transactionFee = 0.000005;
-        
-        // Wallet verification - inline instead of calling setupWallet
-        if (!this.bot.state.wallet) {
-            console.error(chalk.red('ERROR: Wallet not configured in TradingBot'));
+        // First try: Copy wallet from parent bot object
+        if (tradingBot && tradingBot.wallet) {
+            console.log(chalk.green('Copying wallet from trading bot main object'));
             
-            // Copy wallet from parent if available
-            if (tradingBot && tradingBot.wallet) {
-                console.log(chalk.green('Copying wallet from trading bot main object'));
-                this.bot.state.wallet = tradingBot.wallet;
-                this.wallet = tradingBot.wallet;
-            } else {
-                console.error(chalk.red('CRITICAL ERROR: No wallet found anywhere!'));
+            // Initialize state if needed
+            if (!this.bot.state) {
+                this.bot.state = {};
             }
-        } else {
-            this.wallet = this.bot.state.wallet;
-            console.log(chalk.green(`Strategy using wallet: ${this.wallet.publicKey.toString()}`));
+            
+            this.bot.state.wallet = tradingBot.wallet;
+            this.wallet = tradingBot.wallet;
+            console.log(chalk.green(`Successfully retrieved wallet: ${this.wallet.publicKey.toString()}`));
+        } 
+        // Second try: Look for wallet in bot.state.keypair or other properties
+        else if (tradingBot && tradingBot.state && tradingBot.state.keypair) {
+            console.log(chalk.green('Found wallet keypair in trading bot state'));
+            this.bot.state.wallet = tradingBot.state.keypair;
+            this.wallet = tradingBot.state.keypair;
+            console.log(chalk.green(`Retrieved wallet from keypair: ${this.wallet.publicKey.toString()}`));
         }
+        // Third try: Check if server has passed wallet via serverState
+        else if (tradingBot && tradingBot.serverState && tradingBot.serverState.wallet) {
+            console.log(chalk.green('Found wallet in server state'));
+            this.bot.state.wallet = tradingBot.serverState.wallet.keypair;
+            this.wallet = tradingBot.serverState.wallet.keypair;
+            console.log(chalk.green(`Retrieved wallet from server state: ${this.wallet.publicKey.toString()}`));
+        }
+        else {
+            console.error(chalk.red('CRITICAL ERROR: No wallet found anywhere!'));
+        }
+    } else {
+        this.wallet = this.bot.state.wallet;
+        console.log(chalk.green(`Strategy using wallet: ${this.wallet.publicKey.toString()}`));
+    }
 
         // Profit tracking
         this.recentProfit = 0;
@@ -1248,49 +1270,62 @@ async executeBestOpportunity(opportunities) {
     }
   }
 
-verifyWalletConfiguration() {
+  verifyWalletConfiguration() {
     console.log(chalk.blue('Verifying wallet configuration...'));
     
-    // Check if wallet is properly configured in the bot
+    // Check if the bot instance has a wallet
+    if (!this.bot || !this.bot.state) {
+      console.error(chalk.red('ERROR: Bot state not properly initialized'));
+      throw new Error('Bot state not properly initialized');
+    }
+    
+    // Check if wallet is properly configured in the bot's state
     if (!this.bot.state.wallet) {
       console.error(chalk.red('ERROR: No wallet configured in bot state'));
       
-      // Try to recover
+      // Try to recover by copying from the bot object
       if (this.bot.wallet) {
         console.log(chalk.yellow('Found wallet in bot object, copying to state'));
         this.bot.state.wallet = this.bot.wallet;
+        this.wallet = this.bot.wallet;
       } else {
         console.error(chalk.red('NO WALLET FOUND - CANNOT CONTINUE'));
         throw new Error('No wallet configured. Trading requires a valid wallet.');
       }
+    } else {
+      // Ensure we have a reference to the wallet
+      this.wallet = this.bot.state.wallet;
     }
     
-    // Verify that the wallet has a private key/keypair
-    if (!this.bot.state.wallet.secretKey && !this.bot.state.wallet.privateKey) {
-      console.error(chalk.red('ERROR: Wallet does not have a private key'));
-      throw new Error('Wallet is missing private key. Cannot sign transactions.');
+    // Check if wallet has a public key
+    if (!this.wallet.publicKey) {
+      console.error(chalk.red('ERROR: Wallet does not have a public key'));
+      throw new Error('Invalid wallet configuration: missing public key');
     }
     
-    // Print wallet address and check if it matches expected address
-    const walletAddress = this.bot.state.wallet.publicKey.toString();
+    // Print wallet address
+    const walletAddress = this.wallet.publicKey.toString();
     console.log(chalk.green(`Wallet configured: ${walletAddress}`));
     
-    // Verify we can retrieve the balance
-    try {
-      // Test balance retrieval
-      const balance = this.bot.state.connection.getBalance(this.bot.state.wallet.publicKey);
-      console.log(chalk.green(`Wallet has ${balance / 1e9} SOL`));
+    // Make sure the wallet has a secretKey for signing transactions
+    if (!this.wallet.secretKey) {
+      console.warn(chalk.yellow('WARNING: Wallet object does not contain secretKey property'));
+      console.warn(chalk.yellow('Checking for keypair properties...'));
       
-      if (balance <= 0) {
-        console.warn(chalk.yellow('WARNING: Wallet has zero balance'));
+      // Try to find alternative signing capabilities
+      if (typeof this.wallet.sign === 'function') {
+        console.log(chalk.green('Wallet has sign method, can be used for transactions'));
+      } else if (typeof this.wallet.signTransaction === 'function') {
+        console.log(chalk.green('Wallet has signTransaction method, can be used for transactions'));
+      } else {
+        console.error(chalk.red('Wallet cannot sign transactions - missing required methods'));
+        throw new Error('Wallet cannot sign transactions - missing required methods');
       }
-      
-      return true;
-    } catch (error) {
-      console.error(chalk.red('Failed to verify wallet balance:'), error);
-      return false;
     }
-  }
+    
+    console.log(chalk.green('✓ Wallet verification completed successfully'));
+    return true;
+}
 
 verifyRealTradingMode() {
     console.log(chalk.green('======================================='));

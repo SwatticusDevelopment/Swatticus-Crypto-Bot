@@ -5,6 +5,8 @@ const fs = require('fs');
 const chalk = require('chalk');
 const fetch = require('node-fetch');
 const bs58 = require('bs58');
+const http = require('http');
+const https = require('https');
 const PriceFetcher = require('./priceFetcher');
 const Decimal = require('decimal.js');
 const EnhancedTradingStrategy = require('./enhancedStrategy');
@@ -12,7 +14,29 @@ const EnhancedTradingStrategy = require('./enhancedStrategy');
 // Load environment variables
 dotenv.config({ path: path.join(__dirname, '..', '.env') });
 
-class SolanaTradingBot {
+
+function createAgents() {
+  // Create HTTP agent for persistent connections
+  const httpAgent = new http.Agent({ 
+    keepAlive: true,
+    keepAliveMsecs: 1000,
+    maxSockets: 5
+  });
+  
+  // Create HTTPS agent for secure connections
+  const httpsAgent = new https.Agent({
+    keepAlive: true,
+    keepAliveMsecs: 1000,
+    maxSockets: 5,
+    timeout: 10000
+  });
+  
+  return { httpAgent, httpsAgent };
+}
+
+const { httpAgent, httpsAgent } = createAgents();
+
+    class SolanaTradingBot {
     constructor() {
         console.log(chalk.blue('Initializing Solana Trading Bot with active trading enabled...'));
         
@@ -85,6 +109,96 @@ class SolanaTradingBot {
         this.initialize();
     }
 
+    async setupConnection() {
+        try {
+            console.log(chalk.blue('Setting up Solana connection with QuickNode...'));
+            
+            // Prioritize the QuickNode endpoint
+            const quickNodeRPC = 'https://damp-falling-river.solana-mainnet.quiknode.pro/c9429d9a0d147f86cc09baa69e6adf899dff4898/';
+            
+            // Create connection configuration
+            const connectionConfig = {
+                commitment: 'confirmed',
+                confirmTransactionInitialTimeout: 60000,
+                disableRetryOnRateLimit: false
+            };
+            
+            console.log(chalk.blue(`Connecting to QuickNode RPC: ${quickNodeRPC}`));
+            
+            try {
+                // Create connection to QuickNode
+                this.state.connection = new Connection(quickNodeRPC, connectionConfig);
+                
+                // Implement request throttling to avoid rate limits
+                this.state.originalGetBalance = this.state.connection.getBalance.bind(this.state.connection);
+                this.state.originalGetTokenAccountsByOwner = this.state.connection.getParsedTokenAccountsByOwner.bind(this.state.connection);
+                
+                // Override methods with rate-limited versions
+                this.state.connection.getBalance = async (...args) => {
+                    await this.throttleRequest();
+                    return this.state.originalGetBalance(...args);
+                };
+                
+                this.state.connection.getParsedTokenAccountsByOwner = async (...args) => {
+                    await this.throttleRequest();
+                    return this.state.originalGetTokenAccountsByOwner(...args);
+                };
+                
+                // Test the connection
+                const blockHeight = await this.state.connection.getBlockHeight();
+                console.log(chalk.green(`Connected to Solana via QuickNode (Block Height: ${blockHeight})`));
+                
+                return true;
+            } catch (error) {
+                console.error(chalk.red(`Failed to connect to QuickNode: ${error.message}`));
+                
+                // Fall back to public endpoints only if QuickNode fails
+                const fallbackRPCs = [
+                    'https://api.mainnet-beta.solana.com',
+                    'https://solana-api.projectserum.com'
+                ];
+                
+                for (const rpc of fallbackRPCs) {
+                    try {
+                        console.log(chalk.yellow(`Falling back to public RPC: ${rpc}`));
+                        this.state.connection = new Connection(rpc, connectionConfig);
+                        
+                        // Even more aggressive throttling for public endpoints
+                        this.rpcRequestDelay = 1000; // 1 second between requests
+                        
+                        const blockHeight = await this.state.connection.getBlockHeight();
+                        console.log(chalk.green(`Connected to Solana fallback (Block Height: ${blockHeight})`));
+                        return true;
+                    } catch (fallbackError) {
+                        console.error(chalk.yellow(`Failed to connect to fallback RPC ${rpc}: ${fallbackError.message}`));
+                    }
+                }
+                
+                throw new Error('All RPC connection attempts failed');
+            }
+        } catch (error) {
+            console.error(chalk.red('Connection setup failed:'), error);
+            throw error;
+        }
+    }
+
+    async throttleRequest() {
+        const minRequestInterval = this.rpcRequestDelay || 200; // Default 200ms between requests
+        const now = Date.now();
+        
+        if (this.state.lastRequestTime) {
+            const timeSinceLastRequest = now - this.state.lastRequestTime;
+            
+            if (timeSinceLastRequest < minRequestInterval) {
+                // Wait until it's safe to make another request
+                const waitTime = minRequestInterval - timeSinceLastRequest;
+                await new Promise(resolve => setTimeout(resolve, waitTime));
+            }
+        }
+        
+        this.state.lastRequestTime = Date.now();
+    }
+
     async initialize() {
         try {
             console.log(chalk.blue('Initializing Solana Trading Bot...'));
@@ -142,57 +256,6 @@ class SolanaTradingBot {
         fs.writeFileSync(enhancedOpportunityLogPath, `=== Enhanced Trading Opportunities Log (${new Date().toISOString()}) ===\n`);
     }
 
-    async setupConnection() {
-        // List of backup RPCs in case the primary one fails
-        const rpcOptions = [
-            this.config.rpcEndpoint,
-            'https://api.mainnet-beta.solana.com',
-            'https://solana-api.projectserum.com',
-            'https://rpc.ankr.com/solana'
-        ];
-        
-        // Try each RPC endpoint until one works
-        for (const rpc of rpcOptions) {
-            try {
-                console.log(chalk.blue(`Attempting to connect to RPC: ${rpc}`));
-                
-                const connectionConfig = {
-                    commitment: 'confirmed',
-                    confirmTransactionInitialTimeout: 60000,
-                    disableRetryOnRateLimit: false, 
-                    httpAgent: new http.Agent({ keepAlive: true }), // Add keepAlive connection
-                    wsAgent: new ws.Agent({ keepAlive: true })
-                  };
-                  
-                  // Implement better rate limiting
-                  this.state.connection = new Connection(
-                    this.config.rpcEndpoint,
-                    connectionConfig
-                  );
-                  
-                  // Add delay between requests
-                  this.rpcRequestDelay = 500; // ms between requests
-                  
-                  // Add a helper method to throttle requests
-                  this.throttledRequest = async (method, ...args) => {
-                    await new Promise(resolve => setTimeout(resolve, this.rpcRequestDelay));
-                    return method.apply(this.state.connection, args);
-                  };
-                  
-                // Test the connection
-                const blockHeight = await this.state.connection.getBlockHeight();
-                console.log(chalk.green(`Connected to Solana (Block Height: ${blockHeight})`));
-                
-                // If we got here, the connection works
-                return;
-            } catch (error) {
-                console.error(chalk.yellow(`Failed to connect to RPC ${rpc}:`, error.message));
-                // Continue to the next RPC option
-            }
-        }
-        
-        throw new Error('All RPC connection attempts failed');
-    }
 
     async loadWallet() {
         try {

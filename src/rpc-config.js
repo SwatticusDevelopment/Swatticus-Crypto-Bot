@@ -1,5 +1,6 @@
-const http = require('http');
+// Updated RPC configuration to use QuickNode endpoint
 const https = require('https');
+const http = require('http');
 
 // Create persistent connection agents to reduce connection overhead
 const httpAgent = new http.Agent({
@@ -15,34 +16,33 @@ const httpsAgent = new https.Agent({
   timeout: 10000 // 10 second timeout
 });
 
-// Configure multiple RPC endpoints for redundancy
-// Free tier RPCs often have rate limits, so it's good to have multiple options
+// Configure RPC endpoints - using QuickNode as primary endpoint
 const RPC_ENDPOINTS = [
   {
-    url: 'https://api.mainnet-beta.solana.com',
+    url: 'https://damp-falling-river.solana-mainnet.quiknode.pro/c9429d9a0d147f86cc09baa69e6adf899dff4898/',
     weight: 10, // Higher weight = higher priority
     rateLimit: {
-      maxRequestsPerSecond: 2, // Limit to 2 requests per second
-      burstLimit: 5 // Allow bursts up to 5 requests
+      maxRequestsPerSecond: 10, // QuickNode has higher rate limits
+      burstLimit: 20 // Allow larger bursts
+    }
+  },
+  // Keep public endpoints as backup only
+  {
+    url: 'https://api.mainnet-beta.solana.com',
+    weight: 3, // Lower priority
+    rateLimit: {
+      maxRequestsPerSecond: 1, // Very conservative with public endpoint
+      burstLimit: 2 
     }
   },
   {
     url: 'https://solana-api.projectserum.com',
-    weight: 8,
-    rateLimit: {
-      maxRequestsPerSecond: 2, 
-      burstLimit: 5
-    }
-  },
-  {
-    url: 'https://rpc.ankr.com/solana',
-    weight: 6,
+    weight: 2,
     rateLimit: {
       maxRequestsPerSecond: 1,
-      burstLimit: 3
+      burstLimit: 2
     }
   }
-  // Add more endpoints if you have access to paid RPCs
 ];
 
 // Implement a simple token bucket rate limiter for each endpoint
@@ -59,40 +59,8 @@ const rateLimiters = RPC_ENDPOINTS.map(endpoint => {
 
 // Function to get the best available RPC endpoint
 async function getBestRpcEndpoint() {
-  // Sort by available tokens and weight
-  const sortedLimiters = [...rateLimiters].sort((a, b) => {
-    if (a.tokens > 0 && b.tokens === 0) return -1;
-    if (a.tokens === 0 && b.tokens > 0) return 1;
-    return b.weight - a.weight;
-  });
-  
-  // Return the best endpoint
-  const best = sortedLimiters[0];
-  
-  // If no tokens available, wait for refill
-  if (best.tokens === 0) {
-    const now = Date.now();
-    const timeSinceRefill = (now - best.lastRefillTime) / 1000;
-    const tokensToAdd = Math.floor(timeSinceRefill * best.tokenRefillRate);
-    
-    if (tokensToAdd > 0) {
-      best.tokens = Math.min(best.maxTokens, tokensToAdd);
-      best.lastRefillTime = now;
-    } else {
-      // Wait for token refill
-      await new Promise(resolve => setTimeout(
-        resolve, 
-        (1 / best.tokenRefillRate) * 1000
-      ));
-      best.tokens = 1;
-      best.lastRefillTime = Date.now();
-    }
-  }
-  
-  // Consume a token
-  best.tokens--;
-  
-  return best.url;
+  // For reliability, prioritize QuickNode
+  return RPC_ENDPOINTS[0].url;
 }
 
 // Export the configuration

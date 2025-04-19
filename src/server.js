@@ -485,55 +485,120 @@ class TradingBotServer {
         }
     }
 
-    handleWebSocketMessage(message, ws) {
-        try {
-            switch(message.type) {
-                case 'connect_wallet':
-                    this.connectWallet(ws);
-                    break;
+   // Complete WebSocket message handler function with the auto-consolidation case
+ handleWebSocketMessage(message, ws) {
+    try {
+        console.log('Received message:', message.type);
         
-                case 'start_bot':
-                    this.startTradingBot(ws);
-                    break;
+        // Handle different types of messages
+        switch(message.type) {
+            case 'connect_wallet':
+                this.connectWallet(ws);
+                break;
         
-                case 'consolidate_profit':
-                    this.triggerManualConsolidation(ws);
-                    break;
+            case 'start_bot':
+                this.startTradingBot(ws);
+                break;
+        
+            case 'consolidate_profit':
+                this.triggerManualConsolidation(ws);
+                break;
     
-                case 'stop_bot':
-                    this.stopTradingBot(ws);
-                    break;
+            case 'stop_bot':
+                this.stopTradingBot(ws);
+                break;
                     
-                case 'update_config':
-                    this.updateConfig(message.config, ws);
-                    break;
+            case 'update_config':
+                this.updateConfig(message.config, ws);
+                break;
         
-                case 'health_check':
-                    // Respond to keep-alive message
-                    ws.send(JSON.stringify({
-                        type: 'health_status',
-                        status: 'ok',
-                        timestamp: Date.now()
-                    }));
-                    break;
-        
-                default:
-                    console.log('Unhandled WebSocket message:', message);
-            }
-        } catch (error) {
-            console.error('Error handling WebSocket message:', error);
-            
-            // Send error back to client
-            try {
+            case 'health_check':
+                // Respond to keep-alive message
                 ws.send(JSON.stringify({
-                    type: 'error',
-                    error: error.message || 'Unknown error'
+                    type: 'health_status',
+                    status: 'ok',
+                    timestamp: Date.now()
                 }));
-            } catch (sendError) {
-                console.error('Error sending error response:', sendError);
-            }
+                break;
+            
+            case 'get_auto_consolidation_data':
+                this.handleAutoConsolidationDataRequest(ws);
+                break;
+        
+            default:
+                console.log('Unhandled WebSocket message:', message);
+        }
+    } catch (error) {
+        console.error('Error handling WebSocket message:', error);
+        
+        // Send error back to client
+        try {
+            ws.send(JSON.stringify({
+                type: 'error',
+                error: error.message || 'Unknown error'
+            }));
+        } catch (sendError) {
+            console.error('Error sending error response:', sendError);
         }
     }
+}
+
+// Handler function for auto-consolidation data requests
+ handleAutoConsolidationDataRequest(ws) {
+    try {
+        console.log('Handling request for auto-consolidation data');
+        
+        // Get consolidated profit data from trading bot state
+        const consolidatedProfit = this.tradingBot?.state?.autoConsolidatedProfit || 0;
+        
+        // Get total profit value if available
+        const totalProfit = this.tradingBot?.state?.realizedProfit || 0;
+        
+        // Get any recent consolidations from history if available
+        const recentConsolidations = [];
+        
+        // If we have a trade history, check for consolidation entries
+        if (this.tradingBot?.state?.tradeHistory) {
+            // Look for entries that appear to be consolidations
+            for (const trade of this.tradingBot.state.tradeHistory) {
+                if (trade.type === 'consolidation' || 
+                    (trade.outputToken === 'SOL' && trade.inputToken !== 'SOL')) {
+                    recentConsolidations.push({
+                        timestamp: trade.timestamp,
+                        amount: trade.outputAmount,
+                        fromToken: trade.inputToken,
+                        txid: trade.txid
+                    });
+                }
+            }
+            
+            // Limit to 5 most recent
+            recentConsolidations.sort((a, b) => b.timestamp - a.timestamp);
+            recentConsolidations.splice(5);
+        }
+        
+        // Prepare response
+        const response = {
+            type: 'auto_consolidation_data',
+            totalConsolidated: consolidatedProfit,
+            totalProfit: totalProfit,
+            recentConsolidations: recentConsolidations
+        };
+        
+        // Send response to client
+        ws.send(JSON.stringify(response));
+        
+        console.log('Sent auto-consolidation data response');
+    } catch (error) {
+        console.error('Error handling auto-consolidation data request:', error);
+        
+        // Send error response
+        ws.send(JSON.stringify({
+            type: 'error',
+            error: 'Failed to retrieve auto-consolidation data'
+        }));
+    }
+}
 
     async connectWallet(ws) {
         try {
@@ -790,96 +855,109 @@ for (let i = 0; i < rpcEndpoints.length; i++) {
 
     async startTradingBot(ws) {
         try {
-          // First check if wallet is connected
-          if (!this.serverState.wallet.connected) {
-            throw new Error("Wallet not connected. Please connect wallet first.");
-          }
+            // First check if wallet is connected
+            if (!this.serverState.wallet.connected) {
+                throw new Error("Wallet not connected. Please connect wallet first.");
+            }
       
-          // Create a new trading bot instance
-          console.log(chalk.blue('Starting Solana Trading Bot...'));
-          this.logEvent('bot_start_attempt', 'Attempting to start trading bot');
+            // Create a new trading bot instance
+            console.log(chalk.blue('Starting Solana Trading Bot...'));
+            this.logEvent('bot_start_attempt', 'Attempting to start trading bot');
           
-          // Initialize profit tracking
-          this.profitTracking = {
-            profits: {
-              SOL: 0,
-              USDC: 0,
-              USDT: 0,
-              mSOL: 0
-            },
-            tradeHistory: [],
-            startTime: Date.now(),
-            totalTrades: 0
-          };
+            // Initialize profit tracking
+            this.profitTracking = {
+                profits: {
+                    SOL: 0,
+                    USDC: 0,
+                    USDT: 0,
+                    mSOL: 0
+                },
+                tradeHistory: [],
+                startTime: Date.now(),
+                totalTrades: 0
+            };
           
-          // Create a new bot instance - with proper wallet configuration
-          try {
-            this.tradingBot = new SolanaTradingBot();
-            
-            // IMPORTANT: Make sure the wallet is properly set
-            console.log(chalk.blue('Configuring wallet for trading bot...'));
-            
-            // Set the bot's wallet to our current wallet explicitly
-            this.tradingBot.state.wallet = this.serverState.wallet.keypair;
-            
-            // Ensure trading is enabled
-            this.tradingBot.state.tradingEnabled = true;
-            console.log(chalk.green('Trading enabled: Real trades will be executed!'));
-            
-            // Log wallet address that will be used for trades
-            console.log(chalk.green(`Trading with wallet: ${this.serverState.wallet.publicKey}`));
-          } catch (error) {
-            console.error(chalk.red('Failed to create trading bot instance:'), error);
-            throw new Error(`Failed to create trading bot: ${error.message}`);
-          }
+            // Create a new bot instance
+            try {
+                // Create a new bot instance
+                this.tradingBot = new SolanaTradingBot();
+                
+                // CRITICAL: Set wallet in MULTIPLE locations to ensure it's available
+                console.log(chalk.blue('Configuring wallet for trading bot...'));
+                
+                // 1. Set in bot.state
+                if (!this.tradingBot.state) {
+                    this.tradingBot.state = {};
+                }
+                this.tradingBot.state.wallet = this.serverState.wallet.keypair;
+                
+                // 2. Set directly on bot object
+                this.tradingBot.wallet = this.serverState.wallet.keypair;
+                
+                // 3. Also set in serverState property (create if needed)
+                if (!this.tradingBot.serverState) {
+                    this.tradingBot.serverState = {};
+                }
+                this.tradingBot.serverState.wallet = this.serverState.wallet;
+                
+                // Ensure trading is enabled
+                this.tradingBot.state.tradingEnabled = true;
+                console.log(chalk.green('Trading enabled: Real trades will be executed!'));
+                
+                // Log wallet address that will be used for trades
+                console.log(chalk.green(`Trading with wallet: ${this.serverState.wallet.publicKey}`));
+            } catch (error) {
+                console.error(chalk.red('Failed to create trading bot instance:'), error);
+                throw new Error(`Failed to create trading bot: ${error.message}`);
+            }
           
-          // Apply our trading pair configuration
-          this.tradingBot.tradingPairs = this.serverState.tradingPairs;
+            // Apply our trading pair configuration
+            this.tradingBot.tradingPairs = this.serverState.tradingPairs;
           
-          // Start the bot
-          try {
-            // Verify wallet is properly configured before starting
-            const walletPublicKey = this.tradingBot.state.wallet.publicKey.toString();
-            console.log(chalk.green(`Verified wallet configuration: ${walletPublicKey}`));
-            
-            await this.tradingBot.start();
-          } catch (error) {
-            console.error(chalk.red('Failed to start trading bot:'), error);
-            throw new Error(`Failed to start trading bot: ${error.message}`);
-          }
+            // Start the bot
+            try {
+                // Verify wallet is properly configured before starting
+                const walletPublicKey = this.tradingBot.state.wallet.publicKey.toString();
+                console.log(chalk.green(`Verified wallet configuration: ${walletPublicKey}`));
+              
+                await this.tradingBot.start();
+            } catch (error) {
+                console.error(chalk.red('Failed to start trading bot:'), error);
+                throw new Error(`Failed to start trading bot: ${error.message}`);
+            }
           
-          // Update server state
-          this.serverState.botRunning = true;
-          this.serverState.status = 'running';
+            // Update server state
+            this.serverState.botRunning = true;
+            this.serverState.status = 'running';
           
-          // Start the bot updates interval
-          this.startBotUpdates();
+            // Start the bot updates interval
+            this.startBotUpdates();
           
-          // Broadcast bot start
-          this.broadcastMessage({
-            type: 'bot_status',
-            status: 'running'
-          });
+            // Broadcast bot start
+            this.broadcastMessage({
+                type: 'bot_status',
+                status: 'running'
+            });
       
-          this.setupProfitConsolidation();
+            this.setupProfitConsolidation();
           
-          console.log(chalk.green('Trading bot started successfully'));
-          this.logEvent('bot_started', 'Trading bot started successfully');
+            console.log(chalk.green('Trading bot started successfully'));
+            this.logEvent('bot_started', 'Trading bot started successfully');
           
-          return true;
+            return true;
         } catch (error) {
-          console.error(chalk.red('Bot start error:'), error);
-          this.logEvent('bot_start_error', error.message);
+            console.error(chalk.red('Bot start error:'), error);
+            this.logEvent('bot_start_error', error.message);
           
-          // Send error message to client
-          ws.send(JSON.stringify({
-            type: 'bot_start_error',
-            error: error.message
-          }));
+            // Send error message to client
+            ws.send(JSON.stringify({
+                type: 'bot_start_error',
+                error: error.message
+            }));
           
-          return false;
+            return false;
         }
-      }
+    }
 
     stopTradingBot(ws) {
         try {
