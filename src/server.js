@@ -104,14 +104,14 @@ class TradingBotServer {
         console.log(chalk.blue('Loading configuration...'));
         try {
             return {
-                minProfitPercentage: parseFloat(process.env.MIN_PROFIT_PERCENTAGE) || 0.3,
-                maxSlippage: parseInt(process.env.MAX_SLIPPAGE_BPS) || 100,
-                refreshInterval: parseInt(process.env.REFRESH_INTERVAL) || 15000,
-                initialBalance: parseFloat(process.env.INITIAL_BALANCE) || 0.1,
-                dailyProfitTarget: parseFloat(process.env.DAILY_PROFIT_TARGET) || 2.0,
-                minTradeSize: parseFloat(process.env.MIN_TRADE_SIZE) || 0.05,
-                maxConcurrentTrades: parseInt(process.env.MAX_CONCURRENT_TRADES) || 3,
-                aggressiveMode: process.env.AGGRESSIVE_MODE === 'true'
+                minProfitPercentage: parseFloat(process.env.MIN_PROFIT_PERCENTAGE),
+                maxSlippage: parseInt(process.env.MAX_SLIPPAGE_BPS),
+                refreshInterval: parseInt(process.env.REFRESH_INTERVAL),
+                initialBalance: parseFloat(process.env.INITIAL_BALANCE),
+                dailyProfitTarget: parseFloat(process.env.DAILY_PROFIT_TARGET),
+                minTradeSize: parseFloat(process.env.MIN_TRADE_SIZE),
+                maxConcurrentTrades: parseInt(process.env.MAX_CONCURRENT_TRADES),
+                aggressiveMode: process.env.AGGRESSIVE_MODE === 'false'
             };
         } catch (error) {
             console.error(chalk.red('Error loading configuration:'), error);
@@ -437,6 +437,7 @@ class TradingBotServer {
         });
     }
 
+    
     sendInitialState(ws) {
         try {
             // Send initial wallet and bot state
@@ -579,34 +580,50 @@ class TradingBotServer {
             // Try multiple RPC endpoints
             const rpcEndpoints = [
                 process.env.RPC_ENDPOINT || 'https://api.mainnet-beta.solana.com',
+                'https://api.mainnet-beta.solana.com',  // Default Solana endpoint as fallback
                 'https://solana-api.projectserum.com',
                 'https://rpc.ankr.com/solana'
             ];
             
             let connectionSuccessful = false;
             
-            for (let i = 0; i < rpcEndpoints.length; i++) {
-                try {
-                    console.log(chalk.blue(`Trying RPC endpoint: ${rpcEndpoints[i]}`));
-                    connection = new Connection(rpcEndpoints[i], 'confirmed');
-                    // Test connection
-                    await connection.getBlockHeight();
-                    console.log(chalk.green(`Connected to Solana RPC: ${rpcEndpoints[i]}`));
-                    connectionSuccessful = true;
-                    break;
-                } catch (error) {
-                    console.error(chalk.yellow(`Failed to connect to RPC ${rpcEndpoints[i]}:`, error.message));
-                    
-                    if (i === rpcEndpoints.length - 1) {
-                        throw new Error("Failed to connect to any Solana RPC endpoint");
-                    }
-                }
-            }
+for (let i = 0; i < rpcEndpoints.length; i++) {
+    try {
+        console.log(chalk.blue(`Trying RPC endpoint: ${rpcEndpoints[i]}`));
+        
+        // Use a simple fetch first to verify the endpoint is responsive
+        const testResponse = await fetch(`${rpcEndpoints[i]}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                jsonrpc: '2.0',
+                id: 1,
+                method: 'getHealth',
+            }),
+        });
+       
+       
+        if (!testResponse.ok) {
+            throw new Error(`RPC health check failed: ${testResponse.status}`);
+        }
             
-            if (!connectionSuccessful) {
-                throw new Error("Failed to connect to any Solana RPC endpoint");
-            }
-            
+
+           // If health check passes, create the connection
+           connection = new Connection(rpcEndpoints[i], 'confirmed');
+        
+           // Simple test call
+           await connection.getBlockHeight();
+           console.log(chalk.green(`Connected to Solana RPC: ${rpcEndpoints[i]}`));
+           connectionSuccessful = true;
+           break;
+       } catch (error) {
+           console.error(chalk.yellow(`Failed to connect to RPC ${rpcEndpoints[i]}:`, error.message));
+           
+           if (i === rpcEndpoints.length - 1) {
+               throw new Error("Failed to connect to any Solana RPC endpoint");
+           }
+       }
+   }
             // Get wallet balances
             let balances = {};
             let retryCount = 0;
@@ -773,88 +790,96 @@ class TradingBotServer {
 
     async startTradingBot(ws) {
         try {
-            // First check if wallet is connected
-            if (!this.serverState.wallet.connected) {
-                throw new Error("Wallet not connected. Please connect wallet first.");
-            }
-
-            // Create a new trading bot instance
-            console.log(chalk.blue('Starting Solana Trading Bot...'));
-            this.logEvent('bot_start_attempt', 'Attempting to start trading bot');
+          // First check if wallet is connected
+          if (!this.serverState.wallet.connected) {
+            throw new Error("Wallet not connected. Please connect wallet first.");
+          }
+      
+          // Create a new trading bot instance
+          console.log(chalk.blue('Starting Solana Trading Bot...'));
+          this.logEvent('bot_start_attempt', 'Attempting to start trading bot');
+          
+          // Initialize profit tracking
+          this.profitTracking = {
+            profits: {
+              SOL: 0,
+              USDC: 0,
+              USDT: 0,
+              mSOL: 0
+            },
+            tradeHistory: [],
+            startTime: Date.now(),
+            totalTrades: 0
+          };
+          
+          // Create a new bot instance - with proper wallet configuration
+          try {
+            this.tradingBot = new SolanaTradingBot();
             
-            // Initialize profit tracking
-            this.profitTracking = {
-                profits: {
-                    SOL: 0,
-                    USDC: 0,
-                    USDT: 0,
-                    mSOL: 0
-                },
-                tradeHistory: [],
-                startTime: Date.now(),
-                totalTrades: 0
-            };
+            // IMPORTANT: Make sure the wallet is properly set
+            console.log(chalk.blue('Configuring wallet for trading bot...'));
             
-            // Create a new bot instance
-            try {
-                this.tradingBot = new SolanaTradingBot();
-            } catch (error) {
-                console.error(chalk.red('Failed to create trading bot instance:'), error);
-                throw new Error(`Failed to create trading bot: ${error.message}`);
-            }
-            
-            // Update trading bot configuration
-            this.tradingBot.config = {
-                ...this.tradingBot.config,
-                ...this.serverState.config
-            };
-            
-            // Set the bot's wallet to our current wallet
+            // Set the bot's wallet to our current wallet explicitly
             this.tradingBot.state.wallet = this.serverState.wallet.keypair;
             
-            // Apply our trading pair configuration
-            this.tradingBot.tradingPairs = this.serverState.tradingPairs;
+            // Ensure trading is enabled
+            this.tradingBot.state.tradingEnabled = true;
+            console.log(chalk.green('Trading enabled: Real trades will be executed!'));
             
-            // Start the bot
-            try {
-                await this.tradingBot.start();
-            } catch (error) {
-                console.error(chalk.red('Failed to start trading bot:'), error);
-                throw new Error(`Failed to start trading bot: ${error.message}`);
-            }
+            // Log wallet address that will be used for trades
+            console.log(chalk.green(`Trading with wallet: ${this.serverState.wallet.publicKey}`));
+          } catch (error) {
+            console.error(chalk.red('Failed to create trading bot instance:'), error);
+            throw new Error(`Failed to create trading bot: ${error.message}`);
+          }
+          
+          // Apply our trading pair configuration
+          this.tradingBot.tradingPairs = this.serverState.tradingPairs;
+          
+          // Start the bot
+          try {
+            // Verify wallet is properly configured before starting
+            const walletPublicKey = this.tradingBot.state.wallet.publicKey.toString();
+            console.log(chalk.green(`Verified wallet configuration: ${walletPublicKey}`));
             
-            // Update server state
-            this.serverState.botRunning = true;
-            this.serverState.status = 'running';
-            
-            // Start the bot updates interval
-            this.startBotUpdates();
-            
-            // Broadcast bot start
-            this.broadcastMessage({
-                type: 'bot_status',
-                status: 'running'
-            });
-
-            this.setupProfitConsolidation();
-            
-            console.log(chalk.green('Trading bot started successfully'));
-            this.logEvent('bot_started', 'Trading bot started successfully');
-            
-            return true;
+            await this.tradingBot.start();
+          } catch (error) {
+            console.error(chalk.red('Failed to start trading bot:'), error);
+            throw new Error(`Failed to start trading bot: ${error.message}`);
+          }
+          
+          // Update server state
+          this.serverState.botRunning = true;
+          this.serverState.status = 'running';
+          
+          // Start the bot updates interval
+          this.startBotUpdates();
+          
+          // Broadcast bot start
+          this.broadcastMessage({
+            type: 'bot_status',
+            status: 'running'
+          });
+      
+          this.setupProfitConsolidation();
+          
+          console.log(chalk.green('Trading bot started successfully'));
+          this.logEvent('bot_started', 'Trading bot started successfully');
+          
+          return true;
         } catch (error) {
-            console.error(chalk.red('Bot start error:'), error);
-            this.logEvent('bot_start_error', error.message);
-            
-            // Send error message to client
-            ws.send(JSON.stringify({
-                type: 'bot_start_error',
-                error: error.message
-            }));
-            
-            return false;
+          console.error(chalk.red('Bot start error:'), error);
+          this.logEvent('bot_start_error', error.message);
+          
+          // Send error message to client
+          ws.send(JSON.stringify({
+            type: 'bot_start_error',
+            error: error.message
+          }));
+          
+          return false;
         }
-    }
+      }
 
     stopTradingBot(ws) {
         try {

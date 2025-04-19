@@ -16,11 +16,11 @@ const TRADING_CONFIG = {
     JUPITER_SWAP_API: 'https://quote-api.jup.ag/v6/swap',
     
     // Trading Parameters
-    MIN_PROFIT_PERCENTAGE: parseFloat(process.env.MIN_PROFIT_PERCENTAGE) || 0.5,
-    MAX_SLIPPAGE_BPS: parseInt(process.env.MAX_SLIPPAGE_BPS) || 500, // 5% slippage tolerance
-    MAX_TRADE_AMOUNT: parseFloat(process.env.MAX_TRADE_AMOUNT) || 0.5, // Max SOL to trade
-    MIN_TRADE_AMOUNT: parseFloat(process.env.MIN_TRADE_AMOUNT) || 0.05, // Minimum trade size
-    TRADE_COOLDOWN: parseInt(process.env.TRADE_COOLDOWN) || 300000, // 5 minutes between trades
+    MIN_PROFIT_PERCENTAGE: parseFloat(process.env.MIN_PROFIT_PERCENTAGE),
+    MAX_SLIPPAGE_BPS: parseInt(process.env.MAX_SLIPPAGE_BPS), // 5% slippage tolerance
+    MAX_TRADE_AMOUNT: parseFloat(process.env.MAX_TRADE_AMOUNT), // Max SOL to trade
+    MIN_TRADE_AMOUNT: parseFloat(process.env.MIN_TRADE_AMOUNT), // Minimum trade size
+    TRADE_COOLDOWN: parseInt(process.env.TRADE_COOLDOWN), // 5 minutes between trades
 };
 
 // Comprehensive Token Configurations

@@ -3,6 +3,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const chalk = require('chalk');
+const rpcConfig = require('./rpc-config');
 
 /**
  * Optimized PriceFetcher class for production trading
@@ -163,6 +164,111 @@ class PriceFetcher {
             }
         }
     }
+
+    async httpsGetWithRetryAndRateLimit(options, retries = 3, timeout = 6000) {
+        // Implement a delay between API requests to prevent rate limiting
+        const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+        
+        // Use exponential backoff starting at 500ms
+        const getBackoff = (attempt) => Math.min(10000, 500 * Math.pow(1.5, attempt));
+        
+        return new Promise(async (resolve, reject) => {
+          let attempt = 0;
+          
+          while (attempt < retries) {
+            try {
+              // Add a delay between attempts with exponential backoff
+              if (attempt > 0) {
+                const backoff = getBackoff(attempt);
+                console.log(`Attempt ${attempt+1}/${retries} after ${backoff}ms delay...`);
+                await delay(backoff);
+              }
+              
+              // Use the httpAgent for persistent connections
+              const requestOptions = {
+                ...options,
+                timeout: timeout,
+                agent: rpcConfig.httpsAgent
+              };
+              
+              // Add random delay to prevent synchronized rate limits
+              await delay(Math.random() * 200);
+              
+              const response = await new Promise((resolve, reject) => {
+                const req = https.get(requestOptions, (res) => {
+                  // Handle redirects
+                  if (res.statusCode === 301 || res.statusCode === 302) {
+                    if (res.headers.location) {
+                      // Follow redirect
+                      const redirectUrl = new URL(res.headers.location);
+                      const redirectOptions = {
+                        ...requestOptions,
+                        hostname: redirectUrl.hostname,
+                        path: redirectUrl.pathname + redirectUrl.search
+                      };
+                      
+                      this.httpsGetWithRetryAndRateLimit(redirectOptions, retries - attempt - 1, timeout)
+                        .then(resolve)
+                        .catch(reject);
+                      return;
+                    }
+                  }
+                  
+                  // Handle rate limiting
+                  if (res.statusCode === 429) {
+                    // Extract retry-after header if available
+                    const retryAfter = parseInt(res.headers['retry-after'] || '1', 10);
+                    const retryDelay = retryAfter * 1000 || getBackoff(attempt);
+                    
+                    console.log(`Rate limited (429). Retry after ${retryDelay}ms`);
+                    
+                    // Consume the response data to free the socket
+                    let data = '';
+                    res.on('data', chunk => { data += chunk; });
+                    res.on('end', () => {
+                      reject(new Error(`Rate limited: ${data}`));
+                    });
+                    return;
+                  }
+                  
+                  // Handle successful response
+                  let data = '';
+                  res.on('data', chunk => { data += chunk; });
+                  res.on('end', () => {
+                    if (res.statusCode >= 200 && res.statusCode < 300) {
+                      try {
+                        resolve(JSON.parse(data));
+                      } catch (error) {
+                        reject(new Error(`Failed to parse response: ${error.message}`));
+                      }
+                    } else {
+                      reject(new Error(`HTTP error ${res.statusCode}: ${data}`));
+                    }
+                  });
+                });
+                
+                req.on('error', reject);
+                req.on('timeout', () => {
+                  req.destroy();
+                  reject(new Error(`Request timed out after ${timeout}ms`));
+                });
+              });
+              
+              return resolve(response);
+            } catch (error) {
+              attempt++;
+              
+              // If this was the last attempt, reject
+              if (attempt >= retries) {
+                return reject(error);
+              }
+              
+              // Otherwise continue to next attempt
+              console.error(`Request failed (attempt ${attempt}/${retries}): ${error.message}`);
+            }
+          }
+        });
+      }
 
     // Enhanced HTTPS fetch with timeout, retries and circuit breaker
     async httpsGetWithRetry(options, retries = 3, timeout = 3000) { // 3 second timeout for faster fallback
@@ -775,72 +881,155 @@ class PriceFetcher {
         return direction / (weightSum * 0.01); // Scales the result to be more meaningful
     }
 
-    // Main public method to get prices with enhanced caching
     async getPrices(pairs) {
         const now = Date.now();
         
-        // Check if we need to throttle API calls
+        // Don't fetch prices too frequently
+        const minTimeBetweenFetches = 5000; // 5 seconds minimum
         const timeSinceLastFetch = now - this.lastFetchTime;
-        if (this.lastFetchTime > 0 && timeSinceLastFetch < 2000) { // 2-second minimum between calls
-            // If we have cached data, use it
-            if (this.priceCache.tokenPrices) {
-                return this.calculatePairPrices(this.priceCache.tokenPrices, pairs);
-            }
-        }
         
-        // Check if cache is valid (only 5 seconds for live trading)
-        if (this.priceCache.timestamp && 
-            (now - this.priceCache.timestamp) < this.CACHE_DURATION) {
+        if (this.lastFetchTime > 0 && timeSinceLastFetch < minTimeBetweenFetches) {
+          // If we have recent cached data, use it
+          if (this.priceCache.timestamp && 
+              (now - this.priceCache.timestamp) < this.CACHE_DURATION) {
             return this.calculatePairPrices(this.priceCache.tokenPrices, pairs);
+          }
+          
+          // Otherwise wait until we can fetch again
+          await new Promise(resolve => setTimeout(resolve, 
+            minTimeBetweenFetches - timeSinceLastFetch
+          ));
         }
         
-        // Fetch fresh prices
-        const tokenPrices = await this.fetchPrices();
+        console.log(chalk.blue('📊 Fetching token prices (rate-limited)...'));
         
-        // Update cache timestamp
-        this.lastFetchTime = now;
-        
-        // Update cache
-        this.priceCache = {
+        // Try multiple sources with fallbacks
+        try {
+          // Prioritize sources that worked better in your logs (KuCoin and CoinGecko)
+          const sources = [
+            { name: 'KuCoin', method: this.fetchKucoinPrices.bind(this), weight: 10 },
+            { name: 'CoinGecko', method: this.fetchCoinGeckoPrices.bind(this), weight: 9 },
+            { name: 'Jupiter', method: this.fetchJupiterPrices.bind(this), weight: 7 },
+            { name: 'Raydium', method: this.fetchRaydiumPrices.bind(this), weight: 6 },
+            { name: 'Birdeye', method: this.fetchBirdeyePrices.bind(this), weight: 5 },
+            { name: 'OpenBook', method: this.fetchOpenbookPrices.bind(this), weight: 4 }
+          ];
+          
+          // Randomly select a source weighted by reliability
+          let totalWeight = sources.reduce((sum, s) => sum + s.weight, 0);
+          let targetWeight = Math.random() * totalWeight;
+          let currentWeight = 0;
+          let selectedSource = sources[0];
+          
+          for (const source of sources) {
+            currentWeight += source.weight;
+            if (currentWeight >= targetWeight) {
+              selectedSource = source;
+              break;
+            }
+          }
+          
+          console.log(`Trying ${selectedSource.name} as primary price source...`);
+          
+          // Try the selected source first
+          let tokenPrices = await selectedSource.method(true);
+          
+          // If that fails, try others in order of weight
+          if (!tokenPrices || Object.keys(tokenPrices).length === 0) {
+            console.log(`${selectedSource.name} failed, trying fallbacks...`);
+            
+            for (const source of sources) {
+              if (source.name === selectedSource.name) continue;
+              
+              console.log(`Trying ${source.name} as fallback...`);
+              tokenPrices = await source.method(true);
+              
+              if (tokenPrices && Object.keys(tokenPrices).length > 0) {
+                console.log(`${source.name} succeeded as fallback`);
+                break;
+              }
+            }
+          }
+          
+          // If all sources fail, use default prices
+          if (!tokenPrices || Object.keys(tokenPrices).length === 0) {
+            console.warn(chalk.yellow('All price sources failed. Using default prices'));
+            tokenPrices = {...this.defaultPrices};
+          }
+          
+          // Update cache
+          this.lastFetchTime = now;
+          this.priceCache = {
             tokenPrices,
             timestamp: now
-        };
-        
-        // Calculate pair prices
-        const pairPrices = this.calculatePairPrices(tokenPrices, pairs);
-        
-        // Periodically log price data (every 10th fetch)
-        if (this.fetchCount % 10 === 0) {
-            this.logPriceData({
-                timestamp: now,
-                tokenPrices,
-                pairs: Object.keys(pairPrices).map(pair => ({
-                    pair,
-                    price: pairPrices[pair].price,
-                    volatility: this.detectVolatility(pair, pairPrices[pair].price).volatility
-                }))
-            });
+          };
+          
+          // Increment metrics
+          this.fetchCount++;
+          this.successCount++;
+          
+          // Calculate and return pair prices
+          const pairPrices = this.calculatePairPrices(tokenPrices, pairs);
+          
+          // Log success every few fetches to avoid log clutter
+          if (this.fetchCount % 10 === 0) {
+            console.log(chalk.green(`Price fetch stats: ${this.fetchCount} total, ${this.successCount} successes, ${this.errorCount} failures`));
+          }
+          
+          return pairPrices;
+        } catch (error) {
+          // Handle fetch errors
+          console.error(chalk.red('Comprehensive price fetching error:'), error.message);
+          this.errorCount++;
+          
+          // Use cached prices if available
+          if (this.priceCache.tokenPrices) {
+            console.log(chalk.yellow('Using cached prices after error'));
+            return this.calculatePairPrices(this.priceCache.tokenPrices, pairs);
+          }
+          
+          // Fall back to default prices as last resort
+          return this.calculatePairPrices(this.defaultPrices, pairs);
         }
-        
-        // Check for significant price movements across all pairs
-        for (const [pair, priceData] of Object.entries(pairPrices)) {
-            const volatilityInfo = this.detectVolatility(pair, priceData.price);
-            
-            // Attach volatility data to price
-            pairPrices[pair].volatility = volatilityInfo.volatility;
-            pairPrices[pair].isVolatile = volatilityInfo.isVolatile;
-            pairPrices[pair].signal = volatilityInfo.signal;
-            pairPrices[pair].direction = volatilityInfo.direction;
-            
-            // Log strong trading signals
-            if (volatilityInfo.signal === 'strong_buy' || volatilityInfo.signal === 'strong_sell') {
-                console.log(chalk.yellow(`🔔 ${pair}: ${volatilityInfo.signal.toUpperCase()} signal detected! Volatility: ${volatilityInfo.volatility.toFixed(2)}%, Direction: ${(volatilityInfo.direction * 100).toFixed(2)}%`));
-            }
-        }
-        
-        return pairPrices;
-    }
+      }
     
+    async getReliablePrices(pairs) {
+        // Try multiple times with increasing backoff
+        let attempts = 0;
+        const maxAttempts = 3;
+        
+        while (attempts < maxAttempts) {
+          try {
+            // Try CoinGecko and Kucoin first since they seem more reliable in your logs
+            const sources = [
+              { name: 'KuCoin', method: this.fetchKucoinPrices.bind(this) },
+              { name: 'CoinGecko', method: this.fetchCoinGeckoPrices.bind(this) },
+              // Other sources as fallbacks...
+            ];
+            
+            // Try each source until we get prices
+            for (const source of sources) {
+              const prices = await source.method(true); // silent mode
+              if (prices && Object.keys(prices).length > 0) {
+                return this.calculatePairPrices(prices, pairs);
+              }
+            }
+            
+            // No sources worked, increase backoff and retry
+            attempts++;
+            await new Promise(r => setTimeout(r, 2000 * attempts));
+          } catch (error) {
+            attempts++;
+            console.error(`Price fetch attempt ${attempts} failed: ${error.message}`);
+            await new Promise(r => setTimeout(r, 2000 * attempts));
+          }
+        }
+        
+        // Fall back to default prices if all attempts fail
+        console.warn('All price sources failed, using default prices');
+        return this.calculatePairPrices(this.defaultPrices, pairs);
+      }
+
     // Get raw token prices (without pair calculation)
     async getRawTokenPrices() {
         const now = Date.now();

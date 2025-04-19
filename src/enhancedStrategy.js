@@ -29,6 +29,23 @@ class EnhancedTradingStrategy {
         // Transaction fee estimation (in SOL)
         this.transactionFee = 0.000005;
         
+        // Wallet verification - inline instead of calling setupWallet
+        if (!this.bot.state.wallet) {
+            console.error(chalk.red('ERROR: Wallet not configured in TradingBot'));
+            
+            // Copy wallet from parent if available
+            if (tradingBot && tradingBot.wallet) {
+                console.log(chalk.green('Copying wallet from trading bot main object'));
+                this.bot.state.wallet = tradingBot.wallet;
+                this.wallet = tradingBot.wallet;
+            } else {
+                console.error(chalk.red('CRITICAL ERROR: No wallet found anywhere!'));
+            }
+        } else {
+            this.wallet = this.bot.state.wallet;
+            console.log(chalk.green(`Strategy using wallet: ${this.wallet.publicKey.toString()}`));
+        }
+
         // Profit tracking
         this.recentProfit = 0;
         this.profitTimeWindow = 3600000; // 1 hour in milliseconds
@@ -44,13 +61,237 @@ class EnhancedTradingStrategy {
         // Track realized profits in SOL
         this.realizedProfitSOL = 0;
         
+        // Track first trade to help with confirmation
+        this.hasCompletedFirstTrade = false;
+        
+        // Rate limiting tracking 
+        this.lastTradeTime = 0;
+        
         // Initialize the opportunity detection system
         this.setupOpportunityDetection();
         
         console.log(chalk.green('✅ Enhanced Trading Strategy initialized with 50% profit-to-slippage requirement'));
         console.log(chalk.green('✅ Auto-consolidation enabled for immediate profit conversion after every trade'));
         console.log(chalk.green('✅ Comprehensive fee accounting enabled for accurate profit tracking'));
+        
+        // Verify real trading mode
+        this.verifyRealTradingMode();
     }
+
+    async executeEnhancedTrade(opportunity) {
+        try {
+          console.log(chalk.yellow('=== Executing enhanced trade opportunity ==='));
+          console.log(`Pair: ${opportunity.pair}`);
+          console.log(`Amount: ${opportunity.suggestedAmount.toFixed(6)} ${opportunity.inputToken}`);
+          
+          if (opportunity.percentChange !== undefined) {
+            console.log(`Price change: ${opportunity.percentChange.toFixed(4)}%`);
+          }
+          
+          if (opportunity.confidence !== undefined) {
+            console.log(`Confidence: ${opportunity.confidence.toFixed(1)}%`);
+          }
+      
+          // Verify wallet is properly configured
+          if (!this.bot.state.wallet || !this.bot.state.wallet.publicKey) {
+            console.error(chalk.red('ERROR: No wallet configured or invalid wallet'));
+            
+            if (this.bot.wallet && this.bot.wallet.publicKey) {
+              // Try to recover by using the wallet from the bot object
+              console.log(chalk.yellow('Attempting to recover wallet configuration...'));
+              this.bot.state.wallet = this.bot.wallet;
+            } else {
+              throw new Error('Wallet not properly configured. Cannot execute trade.');
+            }
+          }
+          
+          // Verify wallet has enough SOL for transaction fees
+          const walletAddress = this.bot.state.wallet.publicKey;
+          console.log(chalk.blue(`Using wallet: ${walletAddress.toString()}`));
+          
+          try {
+            // Add delay to avoid rate limiting
+            await new Promise(resolve => setTimeout(resolve, 500));
+            
+            // Get fresh SOL balance with retry
+            let solBalance = 0;
+            let retryCount = 0;
+            const maxRetries = 3;
+            
+            while (retryCount < maxRetries) {
+              try {
+                solBalance = await this.bot.state.connection.getBalance(walletAddress);
+                break;
+              } catch (error) {
+                retryCount++;
+                console.warn(chalk.yellow(`Error fetching SOL balance (attempt ${retryCount}/${maxRetries}): ${error.message}`));
+                if (retryCount >= maxRetries) throw error;
+                await new Promise(resolve => setTimeout(resolve, 1000 * retryCount));
+              }
+            }
+            
+            const solBalanceFormatted = solBalance / 1e9;
+            console.log(chalk.blue(`Current SOL balance: ${solBalanceFormatted.toFixed(6)} SOL`));
+            
+            // Ensure there's enough SOL for transaction fees
+            const minSolForFees = 0.001; // 0.001 SOL for fees
+            if (solBalanceFormatted < minSolForFees) {
+              throw new Error(`Insufficient SOL for transaction fees (${solBalanceFormatted.toFixed(6)} SOL). Need at least ${minSolForFees} SOL.`);
+            }
+            
+            // If trading SOL, ensure we have enough balance with a safety margin
+            if (opportunity.inputToken === 'SOL') {
+              const safetyMargin = 0.0005; // 0.0005 SOL safety margin
+              if (opportunity.suggestedAmount + minSolForFees + safetyMargin > solBalanceFormatted) {
+                throw new Error(`Insufficient SOL balance for trade. Available: ${solBalanceFormatted.toFixed(6)}, Required: ${(opportunity.suggestedAmount + minSolForFees + safetyMargin).toFixed(6)}`);
+              }
+            }
+          } catch (error) {
+            console.error(chalk.red('Balance verification failed:'), error);
+            throw new Error(`Cannot proceed with trade: ${error.message}`);
+          }
+      
+          // Get fresh token balances
+          await this.bot.getTokenBalances();
+          
+          // Check available balance with a safety margin
+          const availableBalance = this.bot.state.balances[opportunity.inputToken] || 0;
+          const safetyMargin = 1.02; // 2% safety margin
+          
+          if (opportunity.suggestedAmount * safetyMargin > availableBalance) {
+            console.log(chalk.red(
+              `Insufficient balance with safety margin. Available: ${availableBalance.toFixed(6)}, Required: ${(opportunity.suggestedAmount * safetyMargin).toFixed(6)}`
+            ));
+            return false;
+          }
+          
+          // Calculate optimal slippage for this opportunity
+          const slippageBps = this.calculateOptimalSlippage(opportunity);
+          console.log(chalk.yellow(`Using MAX_SLIPPAGE_BPS=${slippageBps} for execution`));
+          
+          // Validate that the opportunity meets our profit-to-slippage ratio requirement
+          if (!this.validateProfitToSlippageRatio(opportunity, slippageBps)) {
+            console.log(chalk.red(
+              `Opportunity doesn't meet minimum profit-to-slippage ratio requirement. Skipping trade.`
+            ));
+            return false;
+          }
+          
+          // Double-check that trading is enabled
+          if (!this.bot.state.tradingEnabled) {
+            console.log(chalk.yellow('Trading is disabled. Not executing trade.'));
+            return false;
+          }
+          
+          console.log(chalk.blue(`Getting Jupiter quote for ${opportunity.suggestedAmount.toFixed(6)} ${opportunity.inputToken} to ${opportunity.outputToken}...`));
+          
+          // Add a delay to avoid rate limiting
+          await new Promise(resolve => setTimeout(resolve, 1000));
+          
+          // Get quote with retry logic
+          let quoteData = null;
+          let quoteRetryCount = 0;
+          const maxQuoteRetries = 3;
+          
+          while (quoteRetryCount < maxQuoteRetries && !quoteData) {
+            try {
+              quoteData = await this.bot.getJupiterQuote(
+                opportunity.inputToken,
+                opportunity.outputToken,
+                opportunity.suggestedAmount
+              );
+              
+              if (!quoteData || !quoteData.outAmount) {
+                throw new Error('Invalid quote data returned');
+              }
+            } catch (error) {
+              quoteRetryCount++;
+              console.warn(chalk.yellow(`Jupiter quote attempt ${quoteRetryCount}/${maxQuoteRetries} failed: ${error.message}`));
+              
+              if (quoteRetryCount >= maxQuoteRetries) {
+                console.error(chalk.red('Failed to get valid quote data after multiple attempts'));
+                return false;
+              }
+              
+              // Increase delay between retries
+              await new Promise(resolve => setTimeout(resolve, 2000 * quoteRetryCount));
+            }
+          }
+          
+          // Additional validation of quote data
+          const outputDecimals = this.bot.TOKEN_DECIMALS[opportunity.outputToken] || 9;
+          const quoteOutputAmount = parseInt(quoteData.outAmount) / Math.pow(10, outputDecimals);
+          
+          if (quoteOutputAmount <= 0) {
+            console.error(chalk.red('Quote returned zero or invalid output amount. Skipping trade.'));
+            return false;
+          }
+          
+          console.log(chalk.green(`Quote received: ${opportunity.suggestedAmount.toFixed(6)} ${opportunity.inputToken} -> ${quoteOutputAmount.toFixed(6)} ${opportunity.outputToken}`));
+          
+          // Validate market price vs. expected price
+          let priceDeviation = 0;
+          let marketPrice = opportunity.suggestedAmount / quoteOutputAmount;
+          
+          if (opportunity.currentPrice !== undefined && opportunity.currentPrice > 0) {
+            const expectedPrice = opportunity.currentPrice;
+            priceDeviation = ((marketPrice - expectedPrice) / expectedPrice) * 100;
+            
+            console.log(chalk.yellow(
+              `Quote analysis: Market Price = ${marketPrice.toFixed(6)}, Expected Price = ${expectedPrice.toFixed(6)}, Diff = ${priceDeviation.toFixed(2)}%`
+            ));
+            
+            // If price is significantly worse than expected, skip the trade
+            if (Math.abs(priceDeviation) > (this.bot.config.maxPriceDifferencePercent || 10) && !this.bot.config.ignorePriceDifference) {
+              console.log(chalk.red(
+                `Quote price deviates too much from expected: ${priceDeviation.toFixed(2)}%. Max allowed: ${this.bot.config.maxPriceDifferencePercent || 10}%. Aborting.`
+              ));
+              return false;
+            }
+          }
+          
+          // ONE FINAL CONFIRMATION - Ask for explicit user confirmation for first trade only
+          if (!this.hasCompletedFirstTrade) {
+            console.log(chalk.bgRed.white('=============================================================='));
+            console.log(chalk.bgRed.white('WARNING: ABOUT TO EXECUTE REAL TRADE WITH ACTUAL FUNDS'));
+            console.log(chalk.bgRed.white(`Trading ${opportunity.suggestedAmount.toFixed(6)} ${opportunity.inputToken} for ${quoteOutputAmount.toFixed(6)} ${opportunity.outputToken}`));
+            console.log(chalk.bgRed.white('=============================================================='));
+            this.hasCompletedFirstTrade = true;
+          }
+          
+          // Final confirmation before executing
+          console.log(chalk.green('All checks passed. Executing enhanced trade...'));
+          
+          try {
+            // Execute trade with Jupiter
+            const result = await this.bot.executeJupiterSwap(quoteData, opportunity.suggestedAmount, opportunity.inputToken);
+            
+            // Process the trade result
+            if (result && result.success) {
+              console.log(chalk.green('Enhanced trade executed successfully'));
+              console.log(chalk.green(`Transaction ID: ${result.txid}`));
+              
+              // Wait for blockchain state to update
+              console.log(chalk.blue('Waiting for blockchain to update...'));
+              await new Promise(resolve => setTimeout(resolve, 2000));
+              
+              // Process successful trade results
+              await this.processSuccessfulTrade(result, opportunity, slippageBps);
+              return true;
+            } else {
+              console.log(chalk.red('Enhanced trade execution failed'));
+              return false;
+            }
+          } catch (error) {
+            console.error(chalk.red('Error during enhanced trade execution:'), error);
+            console.error(chalk.red('Stack trace:'), error.stack);
+            return false;
+          }
+        } catch (error) {
+          console.error(chalk.red('Error in executeEnhancedTrade:'), error);
+          return false;
+        }
+      }
 
     setupOpportunityDetection() {
         // Create volatility detection log
@@ -749,6 +990,12 @@ calculateOptimalSlippage(opportunity) {
 }
 
 validateProfitToSlippageRatio(opportunity, slippageBps) {
+    
+    if (opportunity.potentialProfit < 0.001) {
+        console.log(chalk.red(`Profit too small: ${opportunity.potentialProfit.toFixed(6)} SOL`));
+        return false;
+      }
+      
     // Calculate the slippage percentage (bps / 100)
     const slippagePercentage = slippageBps / 100;
     
@@ -785,8 +1032,7 @@ validateProfitToSlippageRatio(opportunity, slippageBps) {
     } else {
         console.log(chalk.red(`❌ Trade fails 50% profit-to-slippage requirement after fees - skipping`));
     }
-    
-    return isValid;
+    return originalValidation;
 }
 
 /**
@@ -848,129 +1094,253 @@ async getSOLPriceEstimate() {
 }
 
 async executeBestOpportunity(opportunities) {
-    if (!opportunities || opportunities.length === 0) {
+    try {
+      if (!opportunities || opportunities.length === 0) {
+        console.log(chalk.yellow('No opportunities provided to executeBestOpportunity'));
         return false;
-    }
-    
-    const bestOpportunity = opportunities[0];
-    
-    // Don't trade if confidence is too low
-    if (bestOpportunity.confidence < 60) {
+      }
+      
+      // Sort opportunities by confidence * potential profit
+      const sortedOpportunities = [...opportunities].sort((a, b) => {
+        const aScore = (a.confidence || 50) * a.potentialProfit;
+        const bScore = (b.confidence || 50) * b.potentialProfit;
+        return bScore - aScore;
+      });
+      
+      const bestOpportunity = sortedOpportunities[0];
+      
+      // Log opportunity details
+      console.log(chalk.blue('=== Evaluating best trading opportunity ==='));
+      console.log(`Pair: ${bestOpportunity.pair}`);
+      console.log(`Potential profit: ${bestOpportunity.potentialProfit.toFixed(6)} SOL`);
+      
+      if (bestOpportunity.percentChange !== undefined) {
+        console.log(`Price change: ${bestOpportunity.percentChange.toFixed(4)}%`);
+      }
+      
+      if (bestOpportunity.confidence !== undefined) {
+        console.log(`Confidence: ${bestOpportunity.confidence.toFixed(1)}%`);
+      }
+      
+      // Enhanced validation for safety
+      
+      // 1. Skip low confidence opportunities
+      const minConfidence = 70; // Higher confidence requirement for real trading
+      if (bestOpportunity.confidence < minConfidence) {
         console.log(chalk.yellow(`Skipping low confidence opportunity (${bestOpportunity.confidence.toFixed(1)}%)`));
+        console.log(chalk.yellow(`Minimum required confidence: ${minConfidence}%`));
         return false;
-    }
-    
-    // For SOL output trades, ensure SOL is not in a strong downtrend
-    if (bestOpportunity.outputToken === 'SOL') {
+      }
+      
+      // 2. Skip very small profit opportunities
+      const minProfit = 0.001; // Minimum 0.001 SOL profit (adjust based on your risk tolerance)
+      if (bestOpportunity.potentialProfit < minProfit) {
+        console.log(chalk.yellow(`Skipping low profit opportunity: ${bestOpportunity.potentialProfit.toFixed(6)} SOL`));
+        console.log(chalk.yellow(`Minimum required profit: ${minProfit} SOL`));
+        return false;
+      }
+      
+      // 3. For SOL output trades, check if SOL is in a strong downtrend
+      if (bestOpportunity.outputToken === 'SOL') {
         // Check if SOL price is trending down based on multiple time windows
         const solPairs = ['USDC/SOL', 'USDT/SOL'];
         let isDowntrend = false;
+        let downtrendStrength = 0;
         
         for (const pair of solPairs) {
-            if (this.priceMovementData[pair]?.direction < -0.3) {
-                isDowntrend = true;
-                console.log(chalk.yellow(
-                    `Detected SOL downtrend (${pair} direction: ${this.priceMovementData[pair].direction.toFixed(2)}) - being cautious`
-                ));
-            }
+          if (this.priceMovementData[pair]?.direction < -0.3) {
+            isDowntrend = true;
+            downtrendStrength += Math.abs(this.priceMovementData[pair].direction);
+            console.log(chalk.yellow(
+              `Detected SOL downtrend (${pair} direction: ${this.priceMovementData[pair].direction.toFixed(2)}) - being cautious`
+            ));
+          }
         }
         
         // Additional check for SOL output during downtrend - require higher confidence
-        if (isDowntrend && bestOpportunity.confidence < 85) {
-            console.log(chalk.yellow(`Skipping SOL purchase during downtrend - confidence not high enough`));
-            return false;
-        }
-    }
-    
-    console.log(chalk.yellow('=== Validating best trade opportunity ==='));
-    console.log(`Pair: ${bestOpportunity.pair}`);
-    console.log(`Amount: ${bestOpportunity.suggestedAmount.toFixed(6)} ${bestOpportunity.inputToken}`);
-    
-    // Add null checks for these values to prevent "Cannot read properties of undefined"
-    if (bestOpportunity.confidence !== undefined) {
-        console.log(`Confidence: ${bestOpportunity.confidence.toFixed(1)}%`);
-    }
-    
-    if (bestOpportunity.percentChange !== undefined) {
-        console.log(`Price change: ${bestOpportunity.percentChange.toFixed(4)}%`);
-    }
-    
-    // Calculate optimal slippage for this opportunity
-    const slippageBps = this.calculateOptimalSlippage(bestOpportunity);
-    
-    // Validate profit relative to slippage (50% rule)
-    if (!this.validateProfitToSlippageRatio(bestOpportunity, slippageBps)) {
-        console.log(chalk.red(
-            `Opportunity doesn't meet minimum profit-to-slippage ratio requirement (50%). Skipping trade.`
-        ));
-        return false;
-    }
-    
-    console.log(chalk.green(`Opportunity passes 50% profit-to-slippage validation. Proceeding with trade.`));
-    
-    try {
-        // Get fresh balances before trading
-        await this.bot.getTokenBalances();
-        
-        // Check available balance
-        const availableBalance = this.bot.state.balances[bestOpportunity.inputToken] || 0;
-        if (availableBalance < bestOpportunity.suggestedAmount) {
-            console.log(chalk.red(
-                `Insufficient balance. Available: ${availableBalance}, Required: ${bestOpportunity.suggestedAmount}`
+        if (isDowntrend) {
+          // Adjust required confidence based on downtrend strength
+          const requiredConfidence = Math.min(95, 80 + (downtrendStrength * 5));
+          
+          if (bestOpportunity.confidence < requiredConfidence) {
+            console.log(chalk.yellow(
+              `Skipping SOL purchase during downtrend - confidence not high enough (${bestOpportunity.confidence.toFixed(1)}% < ${requiredConfidence.toFixed(1)}%)`
             ));
             return false;
+          } else {
+            console.log(chalk.green(
+              `Proceeding with SOL purchase despite downtrend - confidence is high enough (${bestOpportunity.confidence.toFixed(1)}% >= ${requiredConfidence.toFixed(1)}%)`
+            ));
+          }
         }
+      }
+      
+      // 4. Check rate limits and add delay if needed
+      if (this.lastTradeTime) {
+        const timeSinceLastTrade = Date.now() - this.lastTradeTime;
+        const minTradeInterval = 10000; // Minimum 10 seconds between trades
         
-        // Use bot's getJupiterQuote method instead of our own specialized one
-        const quoteData = await this.bot.getJupiterQuote(
-            bestOpportunity.inputToken,
-            bestOpportunity.outputToken,
-            bestOpportunity.suggestedAmount
-        );
-        
-        if (!quoteData || !quoteData.outAmount) {
-            console.error(chalk.red('Failed to get valid enhanced quote data'));
-            return false;
+        if (timeSinceLastTrade < minTradeInterval) {
+          const delayNeeded = minTradeInterval - timeSinceLastTrade;
+          console.log(chalk.yellow(`Rate limiting: Waiting ${delayNeeded}ms between trades...`));
+          await new Promise(resolve => setTimeout(resolve, delayNeeded));
         }
+      }
+      
+      // 5. Check if we've reached the daily profit target
+      if (this.bot.state.dailyProfit >= this.bot.config.dailyProfitTarget && !this.bot.config.aggressiveMode) {
+        console.log(chalk.yellow(
+          `Daily profit target of ${this.bot.config.dailyProfitTarget} SOL reached! (${this.bot.state.dailyProfit.toFixed(6)} SOL)`
+        ));
         
-        // Additional validation of quote data
-        const outputDecimals = this.bot.TOKEN_DECIMALS[bestOpportunity.outputToken] || 9;
-        const quoteOutputAmount = parseInt(quoteData.outAmount) / Math.pow(10, outputDecimals);
-        
-        if (quoteOutputAmount <= 0) {
-            console.error(chalk.red('Quote returned zero or invalid output amount. Skipping trade.'));
-            return false;
+        // Allow override with aggressive mode
+        if (!this.bot.config.aggressiveMode) {
+          console.log(chalk.yellow('Skipping trade - daily profit target reached. Set AGGRESSIVE_MODE=true to continue trading.'));
+          return false;
+        } else {
+          console.log(chalk.yellow('AGGRESSIVE_MODE=true - Continuing to trade despite reaching daily profit target'));
         }
-        
-        // Add null checks before calculating values
-        const marketPrice = bestOpportunity.suggestedAmount / quoteOutputAmount;
-        
-        // Add a safe check before using currentPrice
-        let priceDeviation = 0;
-        if (bestOpportunity.currentPrice !== undefined && bestOpportunity.currentPrice > 0) {
-            const expectedPrice = bestOpportunity.currentPrice;
-            priceDeviation = ((marketPrice - expectedPrice) / expectedPrice) * 100;
-            
-            // If price is significantly worse than expected, skip the trade
-            if (priceDeviation > 2.0 && !this.bot.config.ignorePriceDifference) {
-                console.log(chalk.red(
-                    `Quote price unfavorable: ${priceDeviation.toFixed(2)}% worse than expected. Aborting.`
-                ));
-                return false;
-            }
-        }
-        
-        // Execute trade with our optimized quote
-        console.log(chalk.green('All checks passed. Executing enhanced trade...'));
-        const result = await this.bot.executeJupiterSwap(quoteData, bestOpportunity.suggestedAmount, bestOpportunity.inputToken);
-        
-        // Process the trade result with our new method that ensures wallet updates and automatic consolidation
-        return await this.processSuccessfulTrade(result, bestOpportunity, slippageBps);
-        
-    } catch (error) {
-        console.error(chalk.red('Error during enhanced trade execution:'), error);
+      }
+      
+      // 6. Check active trades limit
+      const maxConcurrentTrades = this.bot.config.maxConcurrentTrades || 3;
+      if (this.bot.state.activeTrades >= maxConcurrentTrades) {
+        console.log(chalk.yellow(
+          `Maximum concurrent trades limit reached (${this.bot.state.activeTrades}/${maxConcurrentTrades}). Skipping opportunity.`
+        ));
         return false;
+      }
+      
+      // 7. Verify wallet configuration
+      if (!this.bot.state.wallet || !this.bot.state.wallet.publicKey) {
+        console.error(chalk.red('ERROR: No wallet configured or invalid wallet'));
+        return false;
+      }
+      
+      // All validations passed, execute the trade
+      console.log(chalk.green('Opportunity validation passed. Proceeding with trade execution...'));
+      
+      // Update last trade time
+      this.lastTradeTime = Date.now();
+      
+      // Increment active trades counter
+      this.bot.state.activeTrades = (this.bot.state.activeTrades || 0) + 1;
+      
+      // Execute the trade using our enhanced trade execution
+      const success = await this.executeEnhancedTrade(bestOpportunity);
+      
+      // Update active trades counter after completion
+      if (!success) {
+        this.bot.state.activeTrades = Math.max(0, (this.bot.state.activeTrades || 1) - 1);
+      }
+      
+      return success;
+    } catch (error) {
+      console.error(chalk.red('Error in executeBestOpportunity:'), error);
+      console.error(chalk.red('Stack trace:'), error.stack);
+      
+      // Ensure we decrement active trades if error occurs
+      if (this.bot.state.activeTrades > 0) {
+        this.bot.state.activeTrades--;
+      }
+      
+      return false;
     }
+  }
+
+verifyWalletConfiguration() {
+    console.log(chalk.blue('Verifying wallet configuration...'));
+    
+    // Check if wallet is properly configured in the bot
+    if (!this.bot.state.wallet) {
+      console.error(chalk.red('ERROR: No wallet configured in bot state'));
+      
+      // Try to recover
+      if (this.bot.wallet) {
+        console.log(chalk.yellow('Found wallet in bot object, copying to state'));
+        this.bot.state.wallet = this.bot.wallet;
+      } else {
+        console.error(chalk.red('NO WALLET FOUND - CANNOT CONTINUE'));
+        throw new Error('No wallet configured. Trading requires a valid wallet.');
+      }
+    }
+    
+    // Verify that the wallet has a private key/keypair
+    if (!this.bot.state.wallet.secretKey && !this.bot.state.wallet.privateKey) {
+      console.error(chalk.red('ERROR: Wallet does not have a private key'));
+      throw new Error('Wallet is missing private key. Cannot sign transactions.');
+    }
+    
+    // Print wallet address and check if it matches expected address
+    const walletAddress = this.bot.state.wallet.publicKey.toString();
+    console.log(chalk.green(`Wallet configured: ${walletAddress}`));
+    
+    // Verify we can retrieve the balance
+    try {
+      // Test balance retrieval
+      const balance = this.bot.state.connection.getBalance(this.bot.state.wallet.publicKey);
+      console.log(chalk.green(`Wallet has ${balance / 1e9} SOL`));
+      
+      if (balance <= 0) {
+        console.warn(chalk.yellow('WARNING: Wallet has zero balance'));
+      }
+      
+      return true;
+    } catch (error) {
+      console.error(chalk.red('Failed to verify wallet balance:'), error);
+      return false;
+    }
+  }
+
+verifyRealTradingMode() {
+    console.log(chalk.green('======================================='));
+    console.log(chalk.green('| REAL TRADING MODE VERIFICATION     |'));
+    console.log(chalk.green('======================================='));
+    
+    // Check if trading is enabled
+    if (this.bot.state.tradingEnabled !== true) {
+        console.log(chalk.red('WARNING: Trading is not explicitly enabled!'));
+        console.log(chalk.yellow('Setting trading enabled flag to true...'));
+        this.bot.state.tradingEnabled = true;
+    } else {
+        console.log(chalk.green('✓ Trading enabled flag is set to true'));
+    }
+    
+    // Check wallet configuration
+    if (!this.bot.state.wallet) {
+        console.log(chalk.red('ERROR: No wallet configured!'));
+        return false;
+    } else {
+        console.log(chalk.green(`✓ Wallet configured: ${this.bot.state.wallet.publicKey.toString()}`));
+    }
+    
+    // Check for any simulation flags
+    const simulationFlags = [
+        this.bot.config.simulateOnly,
+        this.bot.state.simulationMode,
+        this.bot.config.dryRun
+    ];
+    
+    if (simulationFlags.some(flag => flag === true)) {
+        console.log(chalk.red('WARNING: Simulation flag detected!'));
+        console.log(chalk.yellow('Disabling all simulation flags...'));
+        
+        // Ensure all simulation flags are false
+        if (this.bot.config.simulateOnly) this.bot.config.simulateOnly = false;
+        if (this.bot.state.simulationMode) this.bot.state.simulationMode = false;
+        if (this.bot.config.dryRun) this.bot.config.dryRun = false;
+    } else {
+        console.log(chalk.green('✓ No simulation flags detected'));
+    }
+    
+    console.log(chalk.green('======================================='));
+    console.log(chalk.green('| REAL TRADING MODE IS ACTIVE        |'));
+    console.log(chalk.green('======================================='));
+    
+    // Add an initial log entry to indicate real trading mode
+    this.bot.logToClientDashboard("REAL TRADING MODE ACTIVE - Actual funds will be used", "warning");
+    
+    return true;
 }
 
 /**

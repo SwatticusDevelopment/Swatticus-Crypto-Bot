@@ -18,18 +18,18 @@ class SolanaTradingBot {
         
         // Enhanced Configuration with defaults
         this.config = {
-            rpcEndpoint: process.env.RPC_ENDPOINT || 'https://api.mainnet-beta.solana.com',
-            minProfitPercentage: parseFloat(process.env.MIN_PROFIT_PERCENTAGE) || 0.08, // Lower threshold
-            maxSlippage: parseInt(process.env.MAX_SLIPPAGE_BPS) || 700, // More tolerant of slippage
-            refreshInterval: parseInt(process.env.REFRESH_INTERVAL) || 8000, // Faster refresh
-            initialBalance: parseFloat(process.env.INITIAL_BALANCE) || 0.1,
-            dailyProfitTarget: parseFloat(process.env.DAILY_PROFIT_TARGET) || 25.0,
-            minTradeSize: parseFloat(process.env.MIN_TRADE_SIZE) || 0.015,
-            maxConcurrentTrades: parseInt(process.env.MAX_CONCURRENT_TRADES) || 15,
-            aggressiveMode: true, // Always use aggressive mode for active trading
-            routingMode: process.env.ROUTING_MODE || 'aggressive',
-            maxPriceDifferencePercent: parseFloat(process.env.MAX_PRICE_DIFFERENCE_PERCENT) || 45,
-            ignorePriceDifference: process.env.IGNORE_PRICE_DIFFERENCE === 'true'
+            rpcEndpoint: process.env.RPC_ENDPOINT,
+            minProfitPercentage: parseFloat(process.env.MIN_PROFIT_PERCENTAGE), // Lower threshold
+            maxSlippage: parseInt(process.env.MAX_SLIPPAGE_BPS), // More tolerant of slippage
+            refreshInterval: parseInt(process.env.REFRESH_INTERVAL), // Faster refresh
+            initialBalance: parseFloat(process.env.INITIAL_BALANCE),
+            dailyProfitTarget: parseFloat(process.env.DAILY_PROFIT_TARGET),
+            minTradeSize: parseFloat(process.env.MIN_TRADE_SIZE),
+            maxConcurrentTrades: parseInt(process.env.MAX_CONCURRENT_TRADES),
+            aggressiveMode: false, // Always use aggressive mode for active trading
+            routingMode: process.env.ROUTING_MODE,
+            maxPriceDifferencePercent: parseFloat(process.env.MAX_PRICE_DIFFERENCE_PERCENT),
+            ignorePriceDifference: process.env.IGNORE_PRICE_DIFFERENCE === 'false'
         };
 
         // Token Configurations
@@ -158,12 +158,27 @@ class SolanaTradingBot {
                 
                 const connectionConfig = {
                     commitment: 'confirmed',
-                    confirmTransactionInitialTimeout: 60000, // 60 seconds
-                    disableRetryOnRateLimit: false
-                };
-                
-                this.state.connection = new Connection(rpc, connectionConfig);
-                
+                    confirmTransactionInitialTimeout: 60000,
+                    disableRetryOnRateLimit: false, 
+                    httpAgent: new http.Agent({ keepAlive: true }), // Add keepAlive connection
+                    wsAgent: new ws.Agent({ keepAlive: true })
+                  };
+                  
+                  // Implement better rate limiting
+                  this.state.connection = new Connection(
+                    this.config.rpcEndpoint,
+                    connectionConfig
+                  );
+                  
+                  // Add delay between requests
+                  this.rpcRequestDelay = 500; // ms between requests
+                  
+                  // Add a helper method to throttle requests
+                  this.throttledRequest = async (method, ...args) => {
+                    await new Promise(resolve => setTimeout(resolve, this.rpcRequestDelay));
+                    return method.apply(this.state.connection, args);
+                  };
+                  
                 // Test the connection
                 const blockHeight = await this.state.connection.getBlockHeight();
                 console.log(chalk.green(`Connected to Solana (Block Height: ${blockHeight})`));
