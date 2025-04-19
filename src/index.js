@@ -459,6 +459,54 @@ class SolanaTradingBot {
         return opportunities.sort((a, b) => b.potentialProfit - a.potentialProfit);
     }
 
+    async checkTransactionStatusExtended(signature, maxAttempts = 5) {
+        let attempts = 0;
+        
+        while (attempts < maxAttempts) {
+            try {
+                // First check the signature status
+                const status = await this.state.connection.getSignatureStatus(signature, {
+                    searchTransactionHistory: true
+                });
+                
+                if (status && status.value) {
+                    if (status.value.err) {
+                        return { success: false, error: JSON.stringify(status.value.err) };
+                    } else if (status.value.confirmationStatus === 'confirmed' || status.value.confirmationStatus === 'finalized') {
+                        console.log(chalk.green(`Transaction confirmed with status: ${status.value.confirmationStatus}`));
+                        
+                        // Add additional verification that account updates have propagated
+                        // by checking the transaction details
+                        try {
+                            const txDetails = await this.state.connection.getParsedTransaction(signature, 'confirmed');
+                            
+                            if (txDetails) {
+                                console.log(chalk.green(`Transaction details retrieved successfully`));
+                                return { success: true, details: txDetails };
+                            }
+                        } catch (error) {
+                            console.warn(chalk.yellow(`Error getting transaction details: ${error.message}`));
+                            // Continue with success anyway since signature is confirmed
+                        }
+                        
+                        return { success: true };
+                    }
+                }
+                
+                // Transaction still pending, wait and retry
+                console.log(chalk.yellow(`Transaction not yet confirmed, waiting... (attempt ${attempts + 1}/${maxAttempts})`));
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                attempts++;
+            } catch (error) {
+                console.error(chalk.yellow(`Error checking transaction status (attempt ${attempts + 1}/${maxAttempts}):`, error.message));
+                attempts++;
+                await new Promise(resolve => setTimeout(resolve, 2000));
+            }
+        }
+        console.log(chalk.yellow(`Could not confirm transaction status after ${maxAttempts} attempts. Transaction ID: ${signature}`));
+    return { success: true, warning: 'Unconfirmed' };
+    }
+
     async getJupiterQuote(inputToken, outputToken, amount) {
         try {
             console.log(chalk.blue(`Getting Jupiter quote for ${amount} ${inputToken} to ${outputToken}...`));
@@ -539,9 +587,6 @@ class SolanaTradingBot {
             
             // Calculate dynamic compute unit settings based on trade size
             const computeUnits = Math.min(1_000_000, Math.max(300_000, Math.floor(amount * 5_000_000)));
-            
-            // IMPORTANT: We'll use either computeUnitPrice OR prioritizationFee, not both
-            // This was causing the Jupiter API error
             
             console.log(chalk.yellow(`Sending swap request to Jupiter API with ${computeUnits} compute units...`));
             
@@ -626,6 +671,10 @@ class SolanaTradingBot {
             
             console.log(chalk.yellow('Waiting for confirmation...'));
             
+            // Wait for blockchain state to update
+            console.log(chalk.yellow('Waiting for full transaction confirmation and account updates...'));
+            await new Promise(resolve => setTimeout(resolve, 5000));
+            
             try {
                 const confirmation = await this.state.connection.confirmTransaction(
                     {signature: txid, blockhash: transaction.message.recentBlockhash, lastValidBlockHeight: 150000000},
@@ -651,8 +700,9 @@ class SolanaTradingBot {
                 console.log(chalk.green(`Transaction confirmed with manual check!`));
             }
             
-            console.log(chalk.green(`Swap executed successfully! Transaction ID: ${txid}`));
+            console.log(chalk.green(`Transaction fully confirmed with state updates! ID: ${txid}`));
             
+            // Get output token name and amount information from the quote
             const outputMint = quoteResponse.outputMint;
             const outputTokenName = this.getTokenNameByAddress(outputMint) || 'Unknown';
             const outputDecimals = this.TOKEN_DECIMALS[outputTokenName] || 9;
@@ -665,7 +715,7 @@ class SolanaTradingBot {
                 success: true,
                 txid,
                 inputAmount: amount,
-                outputAmount,
+                outputAmount,  // Now outputAmount is properly defined
                 inputToken,
                 outputToken: outputTokenName
             };
@@ -675,7 +725,6 @@ class SolanaTradingBot {
             return false;
         }
     }
-
     async checkTransactionStatus(signature, maxAttempts = 5) {
         let attempts = 0;
         
@@ -813,7 +862,180 @@ class SolanaTradingBot {
             return false;
         }
     }
+
+    async executeAndConsolidateTrade(opportunity) {
+        try {
+            console.log(chalk.yellow('=== Executing trade opportunity with automatic consolidation ==='));
+            console.log(`Pair: ${opportunity.pair}`);
+            console.log(`Amount: ${opportunity.suggestedAmount.toFixed(6)} ${opportunity.inputToken}`);
+            
+            if (opportunity.percentChange !== undefined) {
+                console.log(`Price change: ${opportunity.percentChange.toFixed(4)}%`);
+            }
     
+            await this.getTokenBalances();
+            const availableBalance = this.state.balances[opportunity.inputToken] || 0;
+    
+            if (availableBalance < opportunity.suggestedAmount) {
+                console.log(chalk.red(`Insufficient balance. Available: ${availableBalance}, Required: ${opportunity.suggestedAmount}`));
+                return false;
+            }
+    
+            const quoteData = await this.getJupiterQuote(
+                opportunity.inputToken,
+                opportunity.outputToken,
+                opportunity.suggestedAmount
+            );
+    
+            if (!quoteData || !quoteData.outAmount) {
+                console.error(chalk.red('Failed to get valid quote data'));
+                return false;
+            }
+    
+            const outputDecimals = this.TOKEN_DECIMALS[opportunity.outputToken] || 9;
+            const quoteOutputAmount = parseInt(quoteData.outAmount) / Math.pow(10, outputDecimals);
+    
+            if (quoteOutputAmount <= 0) {
+                console.error(chalk.red('Quote returned zero or invalid output amount. Skipping trade.'));
+                return false;
+            }
+    
+            // Calculate USD per SOL from quote (to compare with historical price)
+            const marketPrice = opportunity.suggestedAmount / quoteOutputAmount;
+            const profitPercentFromTrend = ((marketPrice - opportunity.currentPrice) / opportunity.currentPrice) * 100;
+    
+            console.log(chalk.yellow(
+                `Quote analysis: Market Price = ${marketPrice.toFixed(6)}, History Price = ${opportunity.currentPrice.toFixed(6)}, Diff = ${profitPercentFromTrend.toFixed(2)}%`
+            ));
+    
+            // Skip if the price difference exceeds our threshold and we're not ignoring differences
+            if (profitPercentFromTrend < -2.0 && !this.config.ignorePriceDifference && 
+                Math.abs(profitPercentFromTrend) > this.config.maxPriceDifferencePercent) {
+                console.log(chalk.red(`Quote not profitable due to excessive slippage. Aborting.`));
+                return false;
+            }
+    
+            if (!this.state.tradingEnabled) {
+                console.log(chalk.yellow('Trading disabled. Not executing trade.'));
+                return false;
+            }
+    
+            console.log(chalk.green('All checks passed. Executing trade...'));
+    
+            const result = await this.executeJupiterSwap(quoteData, opportunity.suggestedAmount, opportunity.inputToken);
+    
+            if (result && result.success) {
+                // Convert input to SOL equivalent (if needed)
+                const inputInSOL = opportunity.inputToken === 'SOL'
+                    ? opportunity.suggestedAmount
+                    : opportunity.suggestedAmount / opportunity.currentPrice;
+    
+                const realizedProfit = result.outputAmount - inputInSOL;
+                const solEquivalentProfit = realizedProfit;
+    
+                this.recordProfit(solEquivalentProfit, result, opportunity);
+    
+                console.log(chalk.green('Trade executed successfully'));
+                console.log(`Transaction ID: ${result.txid}`);
+                console.log(`Realized profit: ${realizedProfit.toFixed(6)} SOL`);
+    
+                // Wait a moment for blockchain state to settle
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                
+                // AUTOMATIC CONSOLIDATION: 
+                // If the output token is not SOL, automatically convert it back to SOL
+                if (result.outputToken !== 'SOL' && result.outputAmount > 0) {
+                    console.log(chalk.blue(`🔄 Automatically consolidating profit to SOL...`));
+                    
+                    try {
+                        // Calculate consolidation amount (95% of the output to allow for fees)
+                        const consolidationAmount = result.outputAmount * 0.95;
+                        
+                        // Get a quote to convert from the output token to SOL
+                        console.log(chalk.blue(`Getting quote to convert ${consolidationAmount.toFixed(6)} ${result.outputToken} to SOL...`));
+                        
+                        const consolidationQuote = await this.getJupiterQuote(
+                            result.outputToken,
+                            'SOL',
+                            consolidationAmount
+                        );
+                        
+                        if (!consolidationQuote || !consolidationQuote.outAmount) {
+                            console.error(chalk.red(`Failed to get quote for ${result.outputToken} to SOL conversion`));
+                        } else {
+                            // Convert outAmount to actual SOL amount
+                            const outAmountSOL = parseInt(consolidationQuote.outAmount) / Math.pow(10, 9);
+                            console.log(chalk.blue(`Quote received: ${consolidationAmount.toFixed(6)} ${result.outputToken} -> ${outAmountSOL.toFixed(6)} SOL`));
+                            
+                            // Execute the consolidation trade
+                            console.log(chalk.blue(`Executing consolidation trade...`));
+                            
+                            const consolidationResult = await this.executeJupiterSwap(
+                                consolidationQuote,
+                                consolidationAmount,
+                                result.outputToken
+                            );
+                            
+                            if (consolidationResult && consolidationResult.success) {
+                                console.log(chalk.green(`✅ Profit successfully consolidated: ${consolidationResult.outputAmount.toFixed(6)} SOL`));
+                                console.log(`Consolidation Transaction ID: ${consolidationResult.txid}`);
+                                
+                                // Update balances after consolidation
+                                await this.getTokenBalances();
+                                
+                                // Broadcast consolidation success via websocket if available
+                                if (this.wsServer) {
+                                    this.wsServer.clients.forEach((client) => {
+                                        if (client.readyState === WebSocket.OPEN) {
+                                            client.send(JSON.stringify({
+                                                type: 'profit_consolidation',
+                                                balances: this.state.balances,
+                                                solGained: consolidationResult.outputAmount,
+                                                message: `Profit consolidated: ${consolidationResult.outputAmount.toFixed(6)} SOL`
+                                            }));
+                                        }
+                                    });
+                                }
+                            } else {
+                                console.error(chalk.red(`Failed to consolidate profit to SOL`));
+                            }
+                        }
+                    } catch (error) {
+                        console.error(chalk.red('Error during automatic profit consolidation:'), error);
+                    }
+                }
+    
+                await this.getTokenBalances();
+                return true;
+            } else {
+                console.log(chalk.red('Trade execution failed'));
+                return false;
+            }
+        } catch (error) {
+            console.error(chalk.red('Error during trade execution:'), error);
+            return false;
+        }
+    }
+    
+    logToClientDashboard(message, type = 'info') {
+        // Skip if websocket not configured
+        if (!this.wsServer) return;
+        
+        try {
+            // Broadcast to all clients
+            this.wsServer.clients.forEach((client) => {
+                if (client.readyState === WebSocket.OPEN) {
+                    client.send(JSON.stringify({
+                        type: 'log_message',
+                        message: message,
+                        messageType: type
+                    }));
+                }
+            });
+        } catch (error) {
+            console.error(chalk.red('Error sending log to dashboard:'), error);
+        }
+    }
 
     recordProfit(solProfit, tradeResult, opportunity) {
         this.state.dailyProfit += solProfit;

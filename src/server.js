@@ -198,6 +198,39 @@ class TradingBotServer {
         }
     }
 
+    async getWalletBalances() {
+        try {
+            // Fetch current prices first to ensure accurate SOL equivalent calculation
+            const prices = this.tradingBot ? await this.tradingBot.fetchCurrentPrices() : {};
+            
+            // Get token balances
+            const balances = this.tradingBot ? await this.tradingBot.getTokenBalances() : {};
+            
+            // Update server state with new balances
+            this.serverState.balances = balances;
+            
+            // Calculate total SOL equivalent ONLY during wallet sync
+            const totalSolEquivalent = this.calculateTotalSolEquivalent(balances, prices);
+            
+            // Create a broadcast message with the updated values
+            const walletUpdateMessage = {
+                type: 'wallet_update',
+                balances: this.serverState.balances,
+                totalSolEquivalent: totalSolEquivalent
+            };
+            
+            // Broadcast the update to all clients
+            this.broadcastMessage(walletUpdateMessage);
+            
+            return balances;
+        } catch (error) {
+            console.error(chalk.red('Error fetching wallet balances:'), error);
+            return this.serverState.balances;
+        }
+    }
+
+
+
     setupRoutes() {
         // Serve index.html
         this.app.get('/', (req, res) => {
@@ -451,17 +484,21 @@ class TradingBotServer {
         }
     }
 
-    async handleWebSocketMessage(message, ws) {
+    handleWebSocketMessage(message, ws) {
         try {
             switch(message.type) {
                 case 'connect_wallet':
-                    await this.connectWallet(ws);
+                    this.connectWallet(ws);
                     break;
         
                 case 'start_bot':
-                    await this.startTradingBot(ws);
+                    this.startTradingBot(ws);
                     break;
         
+                case 'consolidate_profit':
+                    this.triggerManualConsolidation(ws);
+                    break;
+    
                 case 'stop_bot':
                     this.stopTradingBot(ws);
                     break;
@@ -705,6 +742,35 @@ class TradingBotServer {
         }
     }
 
+    updateProfitTracking(newProfit) {
+        // Make sure to store the initial balance when the bot starts
+        if (!this.profitTracking.initialBalance && this.serverState.balances['SOL']) {
+            this.profitTracking.initialBalance = this.serverState.balances['SOL'];
+            console.log(chalk.blue(`Setting initial SOL balance for profit tracking: ${this.profitTracking.initialBalance}`));
+        }
+        
+        // Add the new profit to our tracking
+        if (newProfit > 0) {
+            // Store the profit by token type
+            if (!this.profitTracking.profits['SOL']) {
+                this.profitTracking.profits['SOL'] = 0;
+            }
+            
+            this.profitTracking.profits['SOL'] += newProfit;
+            
+            // Log profit update
+            console.log(chalk.green(`Updated total SOL profit: ${this.profitTracking.profits['SOL'].toFixed(6)}`));
+            
+            // Broadcast profit update to ensure UI stays in sync
+            this.broadcastMessage({
+                type: 'profit_update',
+                profits: this.profitTracking.profits,
+                totalProfit: this.profitTracking.profits['SOL'],
+                persistentProfit: true  // Add flag to ensure frontend knows this is a persistent value
+            });
+        }
+    }
+
     async startTradingBot(ws) {
         try {
             // First check if wallet is connected
@@ -769,6 +835,8 @@ class TradingBotServer {
                 type: 'bot_status',
                 status: 'running'
             });
+
+            this.setupProfitConsolidation();
             
             console.log(chalk.green('Trading bot started successfully'));
             this.logEvent('bot_started', 'Trading bot started successfully');
@@ -827,6 +895,250 @@ class TradingBotServer {
             ws.send(JSON.stringify({
                 type: 'bot_stop_error',
                 error: error.message
+            }));
+            
+            return false;
+        }
+    }
+
+
+    recordProfit(solProfit, tradeResult, opportunity) {
+        // Existing profit recording code...
+        this.state.dailyProfit += solProfit;
+        this.state.totalProfit += solProfit;
+        
+        // Initialize per-token profit tracking if needed
+        if (!this.state.tokenProfits) {
+            this.state.tokenProfits = {
+                SOL: 0,
+                USDC: 0,
+                USDT: 0
+            };
+        }
+        
+        // Track native profit in output token
+        const nativeProfit = tradeResult.outputAmount - (
+            opportunity.inputToken === opportunity.outputToken
+                ? opportunity.suggestedAmount
+                : opportunity.inputToken === 'SOL'
+                    ? opportunity.suggestedAmount
+                    : opportunity.suggestedAmount / opportunity.currentPrice
+        );
+        
+        if (this.state.tokenProfits[tradeResult.outputToken] !== undefined) {
+            this.state.tokenProfits[tradeResult.outputToken] += nativeProfit;
+        }
+        
+        const timestamp = new Date().toISOString();
+        const tradeRecord = {
+            timestamp,
+            pair: opportunity.pair,
+            inputAmount: tradeResult.inputAmount,
+            inputToken: tradeResult.inputToken,
+            outputAmount: tradeResult.outputAmount,
+            outputToken: tradeResult.outputToken,
+            profit: solProfit,
+            txid: tradeResult.txid
+        };
+        
+        // Add to history
+        this.state.tradeHistory.push(tradeRecord);
+        if (this.state.tradeHistory.length > 50) {
+            this.state.tradeHistory.shift();
+        }
+        
+        // Log to CSV
+        const logEntry = `${timestamp},${opportunity.pair},${tradeResult.inputAmount},${tradeResult.inputToken},${tradeResult.outputAmount},${tradeResult.outputToken},${solProfit},${tradeResult.txid}\n`;
+        fs.appendFileSync(path.join(__dirname, 'logs', 'trade_history.csv'), logEntry);
+        
+        // NEW: Update the wallet balances to reflect the profit
+        // This ensures the wallet balance increases properly after profitable trades
+        this.updateWalletAfterProfitableTrade({
+            outputToken: tradeResult.outputToken,
+            profit: solProfit,
+            txid: tradeResult.txid
+        });
+        
+        // Broadcast detailed profit update
+        this.broadcastMessage({
+            type: 'profit_update',
+            profits: this.state.tokenProfits,
+            solProfit: this.state.tokenProfits['SOL'],
+            totalProfit: this.state.totalProfit,
+            txid: tradeResult.txid,
+            persistentProfit: true
+        });
+        
+        this.checkProfitTarget();
+    }
+
+    async consolidateTradeProfit() {
+        try {
+            console.log(chalk.green('========================================'));
+            console.log(chalk.green('CONSOLIDATING PROFIT TO MAIN WALLET'));
+            console.log(chalk.green('========================================'));
+            
+            // 1. Get all token balances
+            await this.refreshWalletBalances(true);
+            
+            // Log current balances
+            console.log(chalk.blue('Current wallet balances:'));
+            Object.entries(this.serverState.balances).forEach(([token, amount]) => {
+                console.log(chalk.blue(`${token}: ${amount.toFixed(6)}`));
+            });
+            
+            // 2. Fetch current prices to determine optimal consolidation strategy
+            const prices = this.tradingBot ? await this.tradingBot.fetchCurrentPrices() : {};
+            
+            // 3. Find tokens with non-SOL balances that can be converted to SOL
+            const tokensToConsolidate = [];
+            for (const [token, amount] of Object.entries(this.serverState.balances)) {
+                // Skip SOL and tokens with very small balances
+                if (token === 'SOL' || amount < 0.000001) continue;
+                
+                // Check if we have a trading pair for this token to SOL
+                const pairToSOL = `${token}/SOL`;
+                if (this.tradingBot.tradingPairs.includes(pairToSOL) && amount > 0.01) {
+                    tokensToConsolidate.push({
+                        token,
+                        amount,
+                        pair: pairToSOL
+                    });
+                }
+            }
+            
+            // Log consolidation plan
+            if (tokensToConsolidate.length > 0) {
+                console.log(chalk.green('Found tokens to consolidate into SOL:'));
+                tokensToConsolidate.forEach(info => {
+                    console.log(chalk.green(`- ${info.amount.toFixed(6)} ${info.token} via ${info.pair}`));
+                });
+                
+                // 4. Execute consolidation trades for each token
+                for (const info of tokensToConsolidate) {
+                    console.log(chalk.yellow(`Consolidating ${info.amount.toFixed(6)} ${info.token} to SOL...`));
+                    
+                    // Determine safe amount to trade (95% of balance to account for fees)
+                    const tradeAmount = info.amount * 0.95;
+                    
+                    // Execute the trade
+                    const quoteData = await this.tradingBot.getJupiterQuote(
+                        info.token,
+                        'SOL',
+                        tradeAmount
+                    );
+                    
+                    if (!quoteData || !quoteData.outAmount) {
+                        console.log(chalk.red(`Failed to get quote for ${info.token} to SOL conversion`));
+                        continue;
+                    }
+                    
+                    console.log(chalk.yellow(`Converting ${tradeAmount.toFixed(6)} ${info.token} to SOL...`));
+                    
+                    const result = await this.tradingBot.executeJupiterSwap(
+                        quoteData,
+                        tradeAmount,
+                        info.token
+                    );
+                    
+                    if (result && result.success) {
+                        console.log(chalk.green(`Successfully consolidated ${info.token} to ${result.outputAmount.toFixed(6)} SOL`));
+                        console.log(chalk.green(`Transaction ID: ${result.txid}`));
+                        
+                        // Add consolidation log to dashboard
+                        this.logToClientDashboard(`Profit consolidation: Converted ${tradeAmount.toFixed(6)} ${info.token} to ${result.outputAmount.toFixed(6)} SOL`, 'profit');
+                        
+                        // Update balances after consolidation
+                        await new Promise(resolve => setTimeout(resolve, 5000)); // Wait for blockchain to update
+                        await this.refreshWalletBalances(true);
+                    } else {
+                        console.log(chalk.red(`Failed to consolidate ${info.token} to SOL`));
+                    }
+                }
+                
+                // 5. Final balance check after all consolidations
+                await this.refreshWalletBalances(true);
+                
+                // Log updated balances
+                console.log(chalk.blue('Updated wallet balances after consolidation:'));
+                Object.entries(this.serverState.balances).forEach(([token, amount]) => {
+                    console.log(chalk.blue(`${token}: ${amount.toFixed(6)}`));
+                });
+                
+                // Log total SOL equivalent
+                const totalSolEquivalent = this.calculateTotalSolEquivalent(this.serverState.balances, prices);
+                console.log(chalk.green(`Total SOL equivalent after consolidation: ${totalSolEquivalent.toFixed(6)} SOL`));
+                
+                // Broadcast update to all clients
+                this.broadcastMessage({
+                    type: 'profit_consolidation',
+                    balances: this.serverState.balances,
+                    totalSolEquivalent: totalSolEquivalent,
+                    message: 'Profit consolidation completed'
+                });
+                
+                return true;
+            } else {
+                console.log(chalk.yellow('No tokens found that need consolidation to SOL'));
+                return false;
+            }
+        } catch (error) {
+            console.error(chalk.red('Error during profit consolidation:'), error);
+            return false;
+        }
+    }
+    
+    // Add this method to automatically run consolidation periodically
+    setupProfitConsolidation() {
+        // Run consolidation every 15 minutes
+        const consolidationInterval = 15 * 60 * 1000;
+        
+        this.intervals.profitConsolidation = setInterval(async () => {
+            try {
+                // Only run if bot is active and we have accumulated some profit
+                if (this.serverState.botRunning && this.profitTracking.profits.SOL > 0.01) {
+                    console.log(chalk.blue('Running scheduled profit consolidation...'));
+                    await this.consolidateTradeProfit();
+                }
+            } catch (error) {
+                console.error(chalk.red('Error in scheduled profit consolidation:'), error);
+            }
+        }, consolidationInterval);
+        
+        console.log(chalk.green(`Profit consolidation scheduled to run every ${consolidationInterval/60000} minutes`));
+    }
+    
+    // Add a manual trigger option that can be called from the UI
+    async triggerManualConsolidation(ws) {
+        try {
+            console.log(chalk.blue('Manual profit consolidation triggered'));
+            
+            // Send status to client
+            ws.send(JSON.stringify({
+                type: 'consolidation_status',
+                status: 'started',
+                message: 'Starting manual profit consolidation'
+            }));
+            
+            // Run consolidation
+            const result = await this.consolidateTradeProfit();
+            
+            // Send completion status
+            ws.send(JSON.stringify({
+                type: 'consolidation_status',
+                status: result ? 'completed' : 'failed',
+                message: result ? 'Profit consolidation completed successfully' : 'Profit consolidation failed'
+            }));
+            
+            return result;
+        } catch (error) {
+            console.error(chalk.red('Error during manual consolidation:'), error);
+            
+            // Send error status
+            ws.send(JSON.stringify({
+                type: 'consolidation_status',
+                status: 'error',
+                message: `Error during consolidation: ${error.message}`
             }));
             
             return false;
@@ -943,6 +1255,37 @@ class TradingBotServer {
         }, 30000);
     }
 
+    calculateTotalSolEquivalent(balances, prices) {
+        try {
+            let totalSolEquivalent = balances['SOL'] || 0;
+            
+            // Add USDC value in SOL
+            if (balances['USDC'] && prices['USDC/SOL'] && prices['USDC/SOL'].price) {
+                totalSolEquivalent += balances['USDC'] * prices['USDC/SOL'].price;
+            }
+            
+            // Add USDT value in SOL
+            if (balances['USDT'] && prices['USDT/SOL'] && prices['USDT/SOL'].price) {
+                totalSolEquivalent += balances['USDT'] * prices['USDT/SOL'].price;
+            }
+            
+            // Add mSOL value in SOL
+            if (balances['mSOL'] && prices['mSOL/SOL'] && prices['mSOL/SOL'].price) {
+                totalSolEquivalent += balances['mSOL'] * prices['mSOL/SOL'].price;
+            }
+            
+            // Store the calculated value separately to prevent it from being overwritten
+            this.serverState.totalSolEquivalent = totalSolEquivalent;
+            
+            console.log(chalk.blue(`Updated total SOL equivalent: ${totalSolEquivalent.toFixed(4)} SOL`));
+            
+            return totalSolEquivalent;
+        } catch (error) {
+            console.error(chalk.red('Error calculating SOL equivalent:'), error);
+            return this.serverState.totalSolEquivalent || 0; // Return previous value on error
+        }
+    }
+
     logNewTrades(trades) {
         try {
             const tradeLogPath = path.join(__dirname, 'logs', 'trades.csv');
@@ -958,17 +1301,114 @@ class TradingBotServer {
     }
 
     broadcastMessage(message) {
-        // Send message to all connected WebSocket clients
-        this.wsServer.clients.forEach((client) => {
-            if (client.readyState === WebSocket.OPEN) {
-                try {
-                    client.send(JSON.stringify(message));
-                } catch (error) {
-                    console.error('Error sending message to client:', error);
+    // Add totalSolEquivalent to balance_update messages if not already present
+    if (message.type === 'balance_update' && !message.totalSolEquivalent) {
+        message.totalSolEquivalent = this.serverState.totalSolEquivalent || 0;
+    }
+    
+    // Send message to all connected WebSocket clients
+    this.wsServer.clients.forEach((client) => {
+        if (client.readyState === WebSocket.OPEN) {
+            try {
+                client.send(JSON.stringify(message));
+            } catch (error) {
+                console.error('Error sending message to client:', error);
+            }
+        }
+    });
+}
+
+async updateWalletAfterProfitableTrade(tradeResult) {
+    try {
+        console.log(chalk.green('Updating wallet balance to reflect profitable trade...'));
+        
+        // Force a fresh balance fetch from the blockchain to ensure we have the latest state
+        await this.refreshWalletBalances(true);
+        
+        // Log the successful wallet refresh
+        console.log(chalk.green(`Wallet balances refreshed after profitable trade`));
+        console.log(chalk.green(`New SOL balance: ${this.serverState.balances['SOL']}`));
+        
+        // Also log to client dashboard
+        this.logToClientDashboard(`Trade profit confirmed: ${tradeResult.profit.toFixed(6)} SOL`, 'profit');
+        this.logToClientDashboard(`Updated SOL balance: ${this.serverState.balances['SOL'].toFixed(6)} SOL`, 'success');
+        
+        return true;
+    } catch (error) {
+        console.error(chalk.red('Error updating wallet after trade:'), error);
+        this.logToClientDashboard(`Error updating wallet balance: ${error.message}`, 'error');
+        return false;
+    }
+}
+
+// Add this method to force a complete refresh of wallet balances from the blockchain
+async refreshWalletBalances(forceUpdate = false) {
+    try {
+        console.log(chalk.blue('Performing complete wallet balance refresh...'));
+        
+        // If we have a trading bot and wallet initialized
+        if (this.tradingBot && this.serverState.wallet.connected) {
+            // Get a fresh connection to ensure we're not using cached data
+            if (forceUpdate) {
+                await this.tradingBot.setupConnection();
+            }
+            
+            // Force a complete balance refresh directly from the blockchain
+            // This bypasses any caching that might be happening
+            const connection = this.tradingBot.state.connection;
+            const publicKey = this.tradingBot.state.wallet.publicKey;
+            
+            // Get SOL balance directly
+            const solBalance = await connection.getBalance(publicKey, 'confirmed');
+            this.serverState.balances['SOL'] = solBalance / 1e9;
+            
+            // Get token accounts with a fresh request
+            const tokenAccounts = await connection.getParsedTokenAccountsByOwner(
+                publicKey,
+                { programId: new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA') },
+                'confirmed'
+            );
+            
+            // Process token accounts
+            for (const { account } of tokenAccounts.value) {
+                const tokenMint = account.data.parsed.info.mint;
+                const tokenAmount = account.data.parsed.info.tokenAmount.uiAmount;
+                
+                // Find token name by mint address
+                const tokenName = this.tradingBot.getTokenNameByAddress(tokenMint);
+                
+                if (tokenName !== 'Unknown' && tokenAmount > 0) {
+                    this.serverState.balances[tokenName] = tokenAmount;
                 }
             }
-        });
+            
+            // Get current prices to calculate SOL equivalent
+            const prices = await this.tradingBot.fetchCurrentPrices();
+            
+            // Calculate total SOL equivalent with the fresh balances and prices
+            const totalSolEquivalent = this.calculateTotalSolEquivalent(this.serverState.balances, prices);
+            
+            // Broadcast the updated balances
+            this.broadcastMessage({
+                type: 'balance_update',
+                balances: this.serverState.balances,
+                totalSolEquivalent: totalSolEquivalent
+            });
+            
+            console.log(chalk.green('Wallet balance refresh completed successfully'));
+            console.log(chalk.green(`Current SOL balance: ${this.serverState.balances['SOL']}`));
+            console.log(chalk.green(`Total SOL equivalent: ${totalSolEquivalent}`));
+            
+            return this.serverState.balances;
+        } else {
+            console.warn(chalk.yellow('Cannot refresh wallet: Trading bot or wallet not initialized'));
+            return this.serverState.balances;
+        }
+    } catch (error) {
+        console.error(chalk.red('Error during wallet refresh:'), error);
+        return this.serverState.balances;
     }
+}
 
     start() {
         const PORT = process.env.HTTP_PORT || 3000;

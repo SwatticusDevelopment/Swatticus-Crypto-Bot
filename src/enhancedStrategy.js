@@ -1,3 +1,14 @@
+/**
+ * Enhanced Trading Strategy Implementation
+ * Ensures each trade profits at least 50% of the slippage (increased from 25%)
+ * Auto-consolidates profits after every successful trade
+ * Includes comprehensive profit tracking and fee accounting
+ * 
+ * To implement: 
+ * 1. Replace the existing enhancedStrategy.js file with this code
+ * 2. Update your .env configuration file with the provided settings
+ */
+
 const chalk = require('chalk');
 const { PublicKey } = require('@solana/web3.js');
 const Decimal = require('decimal.js');
@@ -10,12 +21,35 @@ class EnhancedTradingStrategy {
         this.previousPrices = {};
         this.priceMovementData = {};
         this.lastOpportunityCheck = 0;
-        this.minMovementThreshold = 0.05; // 0.05% minimum movement to consider
-        this.highValuePairs = ['SOL/USDC', 'SOL/USDT', 'USDC/SOL', 'USDT/SOL'];
+        
+        // Import config from environment or use defaults
+        this.minMovementThreshold = parseFloat(process.env.MIN_MOVEMENT_THRESHOLD) || 0.04;
+        this.highValuePairs = (process.env.HIGH_VALUE_PAIRS || 'SOL/USDC,SOL/USDT,USDC/SOL,USDT/SOL').split(',');
+        
+        // Transaction fee estimation (in SOL)
+        this.transactionFee = 0.000005;
+        
+        // Profit tracking
         this.recentProfit = 0;
         this.profitTimeWindow = 3600000; // 1 hour in milliseconds
         this.profitHistory = [];
+        this.totalTrades = 0;
+        this.successfulTrades = 0;
+        this.failedTrades = 0;
+        
+        // Auto-consolidation settings
+        this.autoConsolidationEnabled = true;
+        this.autoConsolidationThreshold = 0.00001;
+        
+        // Track realized profits in SOL
+        this.realizedProfitSOL = 0;
+        
+        // Initialize the opportunity detection system
         this.setupOpportunityDetection();
+        
+        console.log(chalk.green('✅ Enhanced Trading Strategy initialized with 50% profit-to-slippage requirement'));
+        console.log(chalk.green('✅ Auto-consolidation enabled for immediate profit conversion after every trade'));
+        console.log(chalk.green('✅ Comprehensive fee accounting enabled for accurate profit tracking'));
     }
 
     setupOpportunityDetection() {
@@ -32,10 +66,211 @@ class EnhancedTradingStrategy {
                 volatilityLogPath, 
                 `=== ENHANCED TRADING OPPORTUNITIES LOG (${new Date().toISOString()}) ===\n`
             );
+            fs.appendFileSync(
+                volatilityLogPath,
+                `Profit-to-slippage requirement: 50%\n\n` // Increased from 25% to 50%
+            );
         } catch (error) {
             console.error(chalk.yellow('Error writing to enhanced opportunities log:'), error);
         }
     }
+
+    async processSuccessfulTrade(result, opportunity, slippageBps) {
+        this.totalTrades++;
+        
+        try {
+            if (result && result.success) {
+                this.successfulTrades++;
+                
+                // Calculate actual profit
+                let inputInSOL = 0;
+                
+                // Safely calculate inputInSOL
+                if (opportunity.inputToken === 'SOL') {
+                    inputInSOL = opportunity.suggestedAmount;
+                } else if (opportunity.currentPrice !== undefined && opportunity.currentPrice > 0) {
+                    inputInSOL = opportunity.suggestedAmount / opportunity.currentPrice;
+                } else {
+                    // Fallback if we can't calculate properly
+                    const solPrice = await this.getSOLPriceEstimate();
+                    inputInSOL = opportunity.suggestedAmount / solPrice;
+                }
+                
+                // Track actual SOL expenditure including transaction fee
+                const totalSolCost = inputInSOL + (opportunity.inputToken === 'SOL' ? this.transactionFee : 0);
+                
+                // For SOL output, calculate the realized profit immediately
+                let realizedProfit = 0;
+                
+                if (opportunity.outputToken === 'SOL') {
+                    // Direct profit calculation for SOL output
+                    realizedProfit = result.outputAmount - totalSolCost;
+                    
+                    // Track net profit after transaction fees
+                    const netProfit = realizedProfit - this.transactionFee;
+                    
+                    // Update realized profit
+                    if (netProfit > 0) {
+                        this.realizedProfitSOL += netProfit;
+                        
+                        // Track in bot state for UI display
+                        if (!this.bot.state.realizedProfit) {
+                            this.bot.state.realizedProfit = 0;
+                        }
+                        this.bot.state.realizedProfit += netProfit;
+                        
+                        // Record profit for hourly tracking
+                        this.recordProfit(netProfit);
+                    }
+                }
+                
+                // Log detailed information about the trade
+                console.log(chalk.green('=== Slippage Profit Analysis ==='));
+                
+                // Calculate what percentage of the slippage this profit represents
+                const slippagePercentage = slippageBps / 100;
+                const expectedProfitPercentage = Math.abs(opportunity.percentChange);
+                const profitToSlippageRatio = expectedProfitPercentage / slippagePercentage;
+                const percentOfSlippage = profitToSlippageRatio * 100;
+                
+                console.log(chalk.green(`Slippage used: ${slippagePercentage.toFixed(2)}%`));
+                console.log(chalk.green(`Expected profit: ${expectedProfitPercentage.toFixed(2)}% (${percentOfSlippage.toFixed(2)}% of slippage)`));
+                console.log(chalk.green(`Transaction fee: ~${this.transactionFee.toFixed(6)} SOL`));
+                
+                if (opportunity.outputToken === 'SOL') {
+                    const netProfit = realizedProfit - this.transactionFee;
+                    console.log(chalk.green(`Realized profit: ${realizedProfit.toFixed(6)} SOL`));
+                    console.log(chalk.green(`Net profit after fees: ${netProfit.toFixed(6)} SOL`));
+                } else {
+                    console.log(chalk.green(`Output token: ${result.outputAmount.toFixed(6)} ${opportunity.outputToken}`));
+                    console.log(chalk.green(`Consolidation needed: Will calculate final profit after conversion to SOL`));
+                }
+                
+                console.log(chalk.green('Trade executed successfully'));
+                console.log(`Transaction ID: ${result.txid}`);
+                
+                // Update success rate stats
+                const successRate = (this.successfulTrades / this.totalTrades) * 100;
+                console.log(chalk.blue(`Trade success rate: ${successRate.toFixed(1)}% (${this.successfulTrades}/${this.totalTrades})`));
+                
+                // Wait a moment for blockchain state to settle
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                
+                // AUTOMATIC CONSOLIDATION: 
+                // Always consolidate after every trade if the output token is not SOL
+                let consolidationResult = null;
+                if (this.autoConsolidationEnabled && result.outputToken !== 'SOL' && result.outputAmount > 0) {
+                    console.log(chalk.blue(`🔄 Automatically consolidating profit to SOL...`));
+                    
+                    try {
+                        // Calculate consolidation amount (95% of the output to allow for fees)
+                        const consolidationAmount = result.outputAmount * 0.95;
+                        
+                        // Get a quote to convert from the output token to SOL
+                        console.log(chalk.blue(`Getting quote to convert ${consolidationAmount.toFixed(6)} ${result.outputToken} to SOL...`));
+                        
+                        const quoteData = await this.bot.getJupiterQuote(
+                            result.outputToken,
+                            'SOL',
+                            consolidationAmount
+                        );
+                        
+                        if (!quoteData || !quoteData.outAmount) {
+                            console.error(chalk.red(`Failed to get quote for ${result.outputToken} to SOL conversion`));
+                        } else {
+                            console.log(chalk.blue(`Quote received: ${consolidationAmount.toFixed(6)} ${result.outputToken} -> SOL`));
+                            
+                            // Execute the consolidation trade
+                            console.log(chalk.blue(`Executing consolidation trade...`));
+                            
+                            consolidationResult = await this.bot.executeJupiterSwap(
+                                quoteData,
+                                consolidationAmount,
+                                result.outputToken
+                            );
+                            
+                            if (consolidationResult && consolidationResult.success) {
+                                console.log(chalk.green(`✅ Profit successfully consolidated: ${consolidationResult.outputAmount.toFixed(6)} SOL`));
+                                console.log(`Consolidation Transaction ID: ${consolidationResult.txid}`);
+                                
+                                // Calculate net profit from the trade + consolidation sequence
+                                // Account for the additional transaction fee
+                                const netConsolidatedProfit = consolidationResult.outputAmount - this.transactionFee - totalSolCost;
+                                
+                                console.log(chalk.green(`Net profit after consolidation: ${netConsolidatedProfit.toFixed(6)} SOL`));
+                                
+                                // Only record positive profit
+                                if (netConsolidatedProfit > 0) {
+                                    this.realizedProfitSOL += netConsolidatedProfit;
+                                    
+                                    // Track in bot state for UI display
+                                    if (!this.bot.state.realizedProfit) {
+                                        this.bot.state.realizedProfit = 0;
+                                    }
+                                    this.bot.state.realizedProfit += netConsolidatedProfit;
+                                    
+                                    // Record profit for hourly tracking
+                                    this.recordProfit(netConsolidatedProfit);
+                                }
+                                
+                                // Update balances after consolidation
+                                await this.bot.getTokenBalances();
+                                
+                                // Update auto-consolidated profit tracker
+                                if (!this.bot.state.autoConsolidatedProfit) {
+                                    this.bot.state.autoConsolidatedProfit = 0;
+                                }
+                                this.bot.state.autoConsolidatedProfit += consolidationResult.outputAmount;
+                                
+                                // Log to dashboard
+                                this.bot.logToClientDashboard(`Profit consolidated: ${consolidationResult.outputAmount.toFixed(6)} SOL`, 'profit');
+                                
+                                // Broadcast the auto-consolidation update to clients
+                                if (this.bot.wsServer) {
+                                    this.bot.wsServer.clients.forEach((client) => {
+                                        if (client.readyState === WebSocket.OPEN) {
+                                            client.send(JSON.stringify({
+                                                type: 'auto_consolidation_update',
+                                                data: {
+                                                    consolidatedAmount: consolidationResult.outputAmount,
+                                                    fromToken: result.outputToken,
+                                                    toToken: 'SOL',
+                                                    totalConsolidated: this.bot.state.autoConsolidatedProfit || 0,
+                                                    netProfit: netConsolidatedProfit,
+                                                    txid: consolidationResult.txid,
+                                                    timestamp: Date.now()
+                                                },
+                                                balances: this.bot.state.balances
+                                            }));
+                                        }
+                                    });
+                                }
+                            } else {
+                                console.error(chalk.red(`Failed to consolidate profit to SOL`));
+                                this.failedTrades++;
+                            }
+                        }
+                    } catch (error) {
+                        console.error(chalk.red('Error during automatic profit consolidation:'), error);
+                        this.failedTrades++;
+                    }
+                } else {
+                    console.log(chalk.blue(`Output already in SOL, no consolidation needed.`));
+                }
+                
+                return true;
+            } else {
+                console.log(chalk.red('Enhanced trade execution failed'));
+                this.failedTrades++;
+                return false;
+            }
+        } catch (error) {
+            console.error(chalk.red('Error processing successful trade:'), error);
+            this.failedTrades++;
+            return false;
+        }
+    }
+    
 
     /**
      * Update price tracking without full opportunity detection
@@ -98,6 +333,7 @@ class EnhancedTradingStrategy {
      * - Detects smaller price movements more effectively
      * - Uses multiple time windows for analysis
      * - Incorporates historical success rate
+     * - Validates profit relative to slippage (50% rule)
      */
     async findEnhancedOpportunities(prices) {
         const currentTime = Date.now();
@@ -208,6 +444,31 @@ class EnhancedTradingStrategy {
                 // Extract token info
                 const [inputToken, outputToken] = pair.split('/');
                 
+                // Extra safety check for SOL output during downtrends
+                if (outputToken === 'SOL') {
+                    // Check if SOL is in a downtrend based on stablecoin pairs
+                    const solPairs = ['USDC/SOL', 'USDT/SOL'];
+                    let isSOLDowntrend = false;
+                    
+                    for (const solPair of solPairs) {
+                        if (this.priceMovementData[solPair]?.direction < -0.3) {
+                            isSOLDowntrend = true;
+                            console.log(chalk.yellow(
+                                `SOL downtrend detected via ${solPair} - being extra cautious with SOL purchases`
+                            ));
+                            break;
+                        }
+                    }
+                    
+                    // Skip this opportunity if SOL is in a downtrend, unless movement is very significant
+                    if (isSOLDowntrend && Math.abs(shortTermMovement) < 0.8) {
+                        console.log(chalk.yellow(
+                            `Skipping ${pair} opportunity during SOL downtrend - movement not significant enough`
+                        ));
+                        continue;
+                    }
+                }
+                
                 // Determine optimal trade size based on available balance and movement
                 const availableBalance = this.bot.state.balances[inputToken] || 0;
                 
@@ -217,15 +478,16 @@ class EnhancedTradingStrategy {
                 if (Math.abs(shortTermMovement) > 0.3) volatilityMultiplier = 1.5;
                 if (Math.abs(shortTermMovement) > 0.5) volatilityMultiplier = 2.0;
                 
-                // Limit to reasonable amounts based on token type
+                // Limit to reasonable amounts based on token type - more conservative
                 let suggestedAmount;
                 
                 if (inputToken === 'SOL') {
-                    // Use up to 30% of available SOL balance for volatile movements
-                    suggestedAmount = Math.min(0.07 * volatilityMultiplier, availableBalance * 0.3);
+                    // More conservative with SOL - max 20% of balance, max 0.1 SOL per trade
+                    suggestedAmount = Math.min(0.05 * volatilityMultiplier, availableBalance * 0.2);
+                    suggestedAmount = Math.min(suggestedAmount, 0.1); // Safety cap
                 } else if (inputToken === 'USDC' || inputToken === 'USDT') {
-                    // Use up to 40% of stablecoin balance for volatile movements
-                    suggestedAmount = Math.min(5.0 * volatilityMultiplier, availableBalance * 0.4);
+                    // Use up to 30% of stablecoin balance for volatile movements
+                    suggestedAmount = Math.min(5.0 * volatilityMultiplier, availableBalance * 0.3);
                 } else {
                     // For other tokens, use up to 30% of available balance
                     suggestedAmount = Math.min(availableBalance * 0.3, availableBalance * 0.1 * volatilityMultiplier);
@@ -239,13 +501,31 @@ class EnhancedTradingStrategy {
                     continue;
                 }
                 
-                // Calculate profit potential more accurately
-                // For deeper movements, we can often realize more than the current differential
+                // Calculate profit potential with transaction fees included
+                // Network fee is approximately 0.000005 SOL per transaction
+                let feePercentage = 0;
+                
+                if (inputToken === 'SOL') {
+                    feePercentage = (this.transactionFee / suggestedAmount) * 100;
+                } else if (currentPrice > 0) {
+                    const solEquivalent = suggestedAmount * currentPrice;
+                    feePercentage = (this.transactionFee / solEquivalent) * 100;
+                }
+                
                 const potentialProfitPercentage = Math.abs(shortTermMovement) * 
                     (isAccelerating ? 1.5 : 1.0) * 
-                    (isHighValuePair ? 1.2 : 1.0);
+                    (isHighValuePair ? 1.2 : 1.0) - 
+                    feePercentage; // Subtract the fee percentage
                     
                 const potentialProfit = (potentialProfitPercentage / 100) * suggestedAmount * currentPrice;
+                
+                // Skip if potential profit is too small after fees
+                if (potentialProfit <= 0.0001) {
+                    console.log(chalk.yellow(
+                        `Skipping ${pair} opportunity: potential profit too small after fees (${potentialProfit.toFixed(6)})`
+                    ));
+                    continue;
+                }
                 
                 // Check historical performance for this pair
                 const pairSuccessRate = this.getHistoricalPairSuccessRate(pair);
@@ -269,7 +549,8 @@ class EnhancedTradingStrategy {
                     potentialProfit,
                     accelerating: isAccelerating,
                     confidence,
-                    timestamp: currentTime
+                    timestamp: currentTime,
+                    feePercentage // Include fee info
                 });
                 
                 // Log to opportunity log
@@ -316,7 +597,7 @@ class EnhancedTradingStrategy {
         
         // Reduce confidence if medium-term movement contradicts short-term
         if (Math.sign(shortTermMove) !== Math.sign(mediumTermMove) && Math.abs(mediumTermMove) > 0.1) {
-            confidence -= 10;
+            confidence -= 15; // Penalize contradicting signals more heavily
         }
         
         // Cap at 95 max confidence
@@ -327,8 +608,12 @@ class EnhancedTradingStrategy {
      * Get historical success rate for a token pair (0-1)
      */
     getHistoricalPairSuccessRate(pair) {
-        // This would normally analyze past trade success
-        // For now using default values based on pair liquidity
+        // This now incorporates actual success rate data
+        if (this.totalTrades > 0) {
+            return Math.min(0.95, Math.max(0.3, this.successfulTrades / this.totalTrades));
+        }
+        
+        // Default values based on pair liquidity if no history
         const defaultRates = {
             'SOL/USDC': 0.85,
             'SOL/USDT': 0.82,
@@ -348,11 +633,28 @@ class EnhancedTradingStrategy {
         // Skip if no opportunities
         if (opportunities.length === 0) return [];
         
-        // Filter out opportunities with <25% confidence
-        const filtered = opportunities.filter(opp => opp.confidence >= 25);
+        // More conservative filtering - require higher confidence
+        const filtered = opportunities.filter(opp => {
+            // Require higher confidence (50% instead of 25%)
+            if (opp.confidence < 50) {
+                return false;
+            }
+            
+            // Extra caution for SOL expenditure - ensure highly confident
+            if (opp.inputToken === 'SOL' && opp.confidence < 65) {
+                return false;
+            }
+            
+            // Ensure profit is significant enough after fees
+            if (opp.potentialProfit < 0.001) {
+                return false;
+            }
+            
+            return true;
+        });
         
-        // Only take top 3 opportunities to avoid diluting capital
-        return filtered.slice(0, 3);
+        // Only take top 2 opportunities to be even more selective (was 3)
+        return filtered.slice(0, 2);
     }
     
     /**
@@ -413,50 +715,174 @@ class EnhancedTradingStrategy {
             
         console.log(chalk.blue(`Hourly profit: ${this.recentProfit.toFixed(6)} SOL`));
         
-        // Check if we're meeting the hourly goal
-        if (this.recentProfit < 1.0) {
-            // Adjust strategy to be more aggressive
-            this.minMovementThreshold = Math.max(0.03, this.minMovementThreshold * 0.9);
-            console.log(chalk.yellow(`Adjusting opportunity threshold to ${this.minMovementThreshold.toFixed(4)}%`));
-        } else {
-            // We're meeting goals, can be slightly more conservative
-            this.minMovementThreshold = Math.min(0.08, this.minMovementThreshold * 1.05);
+        // Adjust strategy based on profitability
+        if (this.recentProfit < 0.01) {
+            // If hourly profit is low, be more selective about trade opportunities
+            this.minMovementThreshold = Math.min(0.06, this.minMovementThreshold * 1.1);
+            console.log(chalk.yellow(`Adjusting opportunity threshold to ${this.minMovementThreshold.toFixed(4)}% (more selective)`));
+        } else if (this.recentProfit > 0.1) {
+            // If hourly profit is high, we can be slightly more aggressive
+            this.minMovementThreshold = Math.max(0.03, this.minMovementThreshold * 0.95);
+            console.log(chalk.yellow(`Adjusting opportunity threshold to ${this.minMovementThreshold.toFixed(4)}% (more opportunities)`));
         }
     }
-    
     /**
-     * Calculate optimal slippage based on market conditions
-     * - Uses more aggressive slippage for highly confident trades
-     * - Reduces slippage for less confident trades
-     */
-    calculateOptimalSlippage(opportunity) {
-        // Base slippage from config
-        const baseSlippage = this.bot.config.maxSlippage || 500;
-        
-        // For high confidence trades, we can use higher slippage
-        if (opportunity.confidence > 80) {
-            return Math.min(baseSlippage * 1.2, 800);
-        }
-        
-        // For low confidence trades, reduce slippage
-        if (opportunity.confidence < 40) {
-            return Math.max(baseSlippage * 0.8, 300);
-        }
-        
+ * Calculate optimal slippage based on market conditions
+ * - More conservative slippage for all trades
+ * - Reduces slippage further for less confident trades
+ */
+calculateOptimalSlippage(opportunity) {
+    // Base slippage from config with a more conservative approach
+    const baseSlippage = Math.floor((this.bot.config.maxSlippage || 500) * 0.8);
+    
+    // For high confidence trades, use slightly higher slippage
+    if (opportunity.confidence > 85) {
         return baseSlippage;
     }
     
-            /**
- * Execute the best trade opportunity using advanced execution
- * This version includes defensive programming to avoid undefined errors
+    // For lower confidence trades, reduce slippage further
+    if (opportunity.confidence < 70) {
+        return Math.max(baseSlippage * 0.7, 250); // More conservative floor
+    }
+    
+    return Math.floor(baseSlippage * 0.9); // Generally more conservative
+}
+
+validateProfitToSlippageRatio(opportunity, slippageBps) {
+    // Calculate the slippage percentage (bps / 100)
+    const slippagePercentage = slippageBps / 100;
+    
+    // Calculate the minimum required profit (50% of slippage - increased from 25%)
+    const minRequiredProfit = slippagePercentage * 0.5;
+    
+    // Get the estimated profit percentage
+    const estimatedProfitPercentage = Math.abs(opportunity.percentChange || 0);
+    
+    // Calculate network fee as a percentage 
+    const feePercentage = opportunity.feePercentage || 0;
+    
+    // Net profit after fee
+    const netProfitPercentage = estimatedProfitPercentage - feePercentage;
+    
+    // Calculate what percentage of slippage this profit represents
+    const profitToSlippageRatio = netProfitPercentage / slippagePercentage;
+    const percentOfSlippage = profitToSlippageRatio * 100;
+    
+    // Log the validation details
+    console.log(chalk.blue(`Slippage Profit Validation:`));
+    console.log(chalk.blue(`- Max slippage: ${slippagePercentage.toFixed(2)}%`));
+    console.log(chalk.blue(`- Required min profit (50% of slippage): ${minRequiredProfit.toFixed(2)}%`));
+    console.log(chalk.blue(`- Transaction fee: ~${feePercentage.toFixed(4)}% of trade amount`));
+    console.log(chalk.blue(`- Estimated gross profit: ${estimatedProfitPercentage.toFixed(2)}%`));
+    console.log(chalk.blue(`- Estimated net profit: ${netProfitPercentage.toFixed(2)}%`));
+    console.log(chalk.blue(`- Net profit is ${percentOfSlippage.toFixed(2)}% of max slippage`));
+    
+    // Return validation result (true if profit is at least 50% of slippage after fees)
+    const isValid = netProfitPercentage >= minRequiredProfit;
+    
+    if (isValid) {
+        console.log(chalk.green(`✅ Trade passes 50% profit-to-slippage requirement after fees`));
+    } else {
+        console.log(chalk.red(`❌ Trade fails 50% profit-to-slippage requirement after fees - skipping`));
+    }
+    
+    return isValid;
+}
+
+/**
+ * Enhanced opportunity validation to ensure profit is at least 50% of slippage
+ * This implements the 50% profit-to-slippage requirement (increased from 25%)
  */
+validateProfitRelativeToSlippage(opportunity, slippageBps) {
+    // Calculate minimum required profit (50% of slippage)
+    const slippagePercentage = slippageBps / 100;
+    const minRequiredProfit = slippagePercentage * 0.5;
+    
+    // Get the estimated profit percentage from the opportunity
+    const estimatedProfitPercentage = Math.abs(opportunity.percentChange);
+    
+    // Calculate expected transaction fee
+    const feePercentage = opportunity.feePercentage || 0;
+    
+    // Calculate net profit after fees
+    const netProfitPercentage = estimatedProfitPercentage - feePercentage;
+    
+    // Log validation details
+    console.log(chalk.blue(`Profit validation: ${estimatedProfitPercentage.toFixed(3)}% gross profit, ${netProfitPercentage.toFixed(3)}% net profit, ${slippagePercentage.toFixed(3)}% slippage`));
+    
+    // Calculate what percentage of slippage this profit represents
+    const profitToSlippageRatio = netProfitPercentage / slippagePercentage;
+    const percentOfSlippage = profitToSlippageRatio * 100;
+    
+    console.log(chalk.blue(`Net profit is ${percentOfSlippage.toFixed(2)}% of maximum slippage`));
+    
+    // Return true if profit is at least 50% of slippage after fees
+    return netProfitPercentage >= minRequiredProfit;
+}
+
+/**
+ * Helper function to estimate SOL price if other methods fail
+ */
+async getSOLPriceEstimate() {
+    // Default fallback value based on recent market conditions
+    const defaultSOLPrice = 145.0; // Updated to current market value
+    
+    try {
+        // Try to get SOL price from trading pairs
+        const pairs = this.bot.tradingPairs.filter(p => p.includes('SOL'));
+        
+        for (const pair of pairs) {
+            if (pair === 'USDC/SOL' || pair === 'USDT/SOL') {
+                const history = this.priceMovementData[pair]?.priceHistory || [];
+                if (history.length > 0) {
+                    return history[history.length - 1].price;
+                }
+            }
+        }
+        
+        return defaultSOLPrice;
+    } catch (error) {
+        console.error(chalk.yellow('Error estimating SOL price:'), error);
+        return defaultSOLPrice;
+    }
+}
+
 async executeBestOpportunity(opportunities) {
     if (!opportunities || opportunities.length === 0) {
         return false;
     }
     
     const bestOpportunity = opportunities[0];
-    console.log(chalk.yellow('=== Executing enhanced trade opportunity ==='));
+    
+    // Don't trade if confidence is too low
+    if (bestOpportunity.confidence < 60) {
+        console.log(chalk.yellow(`Skipping low confidence opportunity (${bestOpportunity.confidence.toFixed(1)}%)`));
+        return false;
+    }
+    
+    // For SOL output trades, ensure SOL is not in a strong downtrend
+    if (bestOpportunity.outputToken === 'SOL') {
+        // Check if SOL price is trending down based on multiple time windows
+        const solPairs = ['USDC/SOL', 'USDT/SOL'];
+        let isDowntrend = false;
+        
+        for (const pair of solPairs) {
+            if (this.priceMovementData[pair]?.direction < -0.3) {
+                isDowntrend = true;
+                console.log(chalk.yellow(
+                    `Detected SOL downtrend (${pair} direction: ${this.priceMovementData[pair].direction.toFixed(2)}) - being cautious`
+                ));
+            }
+        }
+        
+        // Additional check for SOL output during downtrend - require higher confidence
+        if (isDowntrend && bestOpportunity.confidence < 85) {
+            console.log(chalk.yellow(`Skipping SOL purchase during downtrend - confidence not high enough`));
+            return false;
+        }
+    }
+    
+    console.log(chalk.yellow('=== Validating best trade opportunity ==='));
     console.log(`Pair: ${bestOpportunity.pair}`);
     console.log(`Amount: ${bestOpportunity.suggestedAmount.toFixed(6)} ${bestOpportunity.inputToken}`);
     
@@ -468,6 +894,19 @@ async executeBestOpportunity(opportunities) {
     if (bestOpportunity.percentChange !== undefined) {
         console.log(`Price change: ${bestOpportunity.percentChange.toFixed(4)}%`);
     }
+    
+    // Calculate optimal slippage for this opportunity
+    const slippageBps = this.calculateOptimalSlippage(bestOpportunity);
+    
+    // Validate profit relative to slippage (50% rule)
+    if (!this.validateProfitToSlippageRatio(bestOpportunity, slippageBps)) {
+        console.log(chalk.red(
+            `Opportunity doesn't meet minimum profit-to-slippage ratio requirement (50%). Skipping trade.`
+        ));
+        return false;
+    }
+    
+    console.log(chalk.green(`Opportunity passes 50% profit-to-slippage validation. Proceeding with trade.`));
     
     try {
         // Get fresh balances before trading
@@ -525,38 +964,9 @@ async executeBestOpportunity(opportunities) {
         console.log(chalk.green('All checks passed. Executing enhanced trade...'));
         const result = await this.bot.executeJupiterSwap(quoteData, bestOpportunity.suggestedAmount, bestOpportunity.inputToken);
         
-        if (result && result.success) {
-            // Calculate actual profit
-            let inputInSOL = 0;
-            
-            // Safely calculate inputInSOL
-            if (bestOpportunity.inputToken === 'SOL') {
-                inputInSOL = bestOpportunity.suggestedAmount;
-            } else if (bestOpportunity.currentPrice !== undefined && bestOpportunity.currentPrice > 0) {
-                inputInSOL = bestOpportunity.suggestedAmount / bestOpportunity.currentPrice;
-            } else {
-                // Fallback if we can't calculate properly
-                const solPrice = await this.getSOLPriceEstimate();
-                inputInSOL = bestOpportunity.suggestedAmount / solPrice;
-            }
-            
-            const realizedProfit = result.outputAmount - inputInSOL;
-            
-            // Record profit for hourly tracking
-            this.recordProfit(realizedProfit);
-            
-            console.log(chalk.green('Enhanced trade executed successfully'));
-            console.log(`Transaction ID: ${result.txid}`);
-            console.log(`Realized profit: ${realizedProfit.toFixed(6)} SOL`);
-            
-            // Update balances
-            await this.bot.getTokenBalances();
-            
-            return true;
-        } else {
-            console.log(chalk.red('Enhanced trade execution failed'));
-            return false;
-        }
+        // Process the trade result with our new method that ensures wallet updates and automatic consolidation
+        return await this.processSuccessfulTrade(result, bestOpportunity, slippageBps);
+        
     } catch (error) {
         console.error(chalk.red('Error during enhanced trade execution:'), error);
         return false;
@@ -564,106 +974,80 @@ async executeBestOpportunity(opportunities) {
 }
 
 /**
- * Helper function to estimate SOL price if other methods fail
+ * Get an optimized Jupiter quote with advanced parameters
  */
-async getSOLPriceEstimate() {
-    // Default fallback value based on recent market conditions
-    const defaultSOLPrice = 133.0;
-    
+async getOptimizedJupiterQuote(inputToken, outputToken, amount, slippageBps) {
     try {
-        // Try to get SOL price from trading pairs
-        const pairs = this.bot.tradingPairs.filter(p => p.includes('SOL'));
+        console.log(chalk.blue(`Getting optimized Jupiter quote for ${amount} ${inputToken} to ${outputToken}...`));
         
-        for (const pair of pairs) {
-            if (pair === 'USDC/SOL' || pair === 'USDT/SOL') {
-                const history = this.priceMovementData[pair]?.priceHistory || [];
-                if (history.length > 0) {
-                    return history[history.length - 1].price;
-                }
-            }
-        }
+        const inputDecimals = this.bot.TOKEN_DECIMALS[inputToken] || 9;
+        const inputAmountLamports = Math.floor(amount * Math.pow(10, inputDecimals));
         
-        return defaultSOLPrice;
-    } catch (error) {
-        console.error(chalk.yellow('Error estimating SOL price:'), error);
-        return defaultSOLPrice;
-    }
-}
-    
-    /**
-     * Get an optimized Jupiter quote with advanced parameters
-     */
-    async getOptimizedJupiterQuote(inputToken, outputToken, amount, slippageBps) {
-        try {
-            console.log(chalk.blue(`Getting optimized Jupiter quote for ${amount} ${inputToken} to ${outputToken}...`));
-            
-            const inputDecimals = this.bot.TOKEN_DECIMALS[inputToken] || 9;
-            const inputAmountLamports = Math.floor(amount * Math.pow(10, inputDecimals));
-            
-            // Enhanced quote parameters
-            const params = new URLSearchParams({
-                inputMint: this.bot.TOKEN_ADDRESSES[inputToken],
-                outputMint: this.bot.TOKEN_ADDRESSES[outputToken],
-                amount: inputAmountLamports.toString(),
-                slippageBps: slippageBps.toString(),
-                onlyDirectRoutes: 'false',
-                asLegacyTransaction: 'false',
-                excludeDexes: '',
-                platformFeeBps: '0'
-            });
-            
-            const url = `https://quote-api.jup.ag/v6/quote?${params.toString()}`;
-            
-            console.log(chalk.yellow(`Enhanced Jupiter quote URL: ${url}`));
-            
-            // Fetch with retry logic
-            const fetch = require('node-fetch');
-            
-            // Retry function for API calls
-            const fetchWithRetry = async (url, options = {}, maxRetries = 3) => {
-                let lastError;
-                for (let i = 0; i < maxRetries; i++) {
-                    try {
-                        const response = await fetch(url, options);
-                        if (!response.ok) {
-                            const errorText = await response.text();
-                            throw new Error(`API error (${response.status}): ${errorText}`);
-                        }
-                        return await response.json();
-                    } catch (error) {
-                        console.error(chalk.yellow(`Fetch attempt ${i + 1}/${maxRetries} failed:`, error.message));
-                        lastError = error;
-                        // Exponential backoff
-                        await new Promise(resolve => setTimeout(resolve, 500 * Math.pow(2, i)));
+        // Enhanced quote parameters - more conservative
+        const params = new URLSearchParams({
+            inputMint: this.bot.TOKEN_ADDRESSES[inputToken],
+            outputMint: this.bot.TOKEN_ADDRESSES[outputToken],
+            amount: inputAmountLamports.toString(),
+            slippageBps: slippageBps.toString(),
+            onlyDirectRoutes: 'false',
+            asLegacyTransaction: 'false',
+            excludeDexes: '',
+            platformFeeBps: '0'
+        });
+        
+        const url = `https://quote-api.jup.ag/v6/quote?${params.toString()}`;
+        
+        console.log(chalk.yellow(`Enhanced Jupiter quote URL: ${url}`));
+        
+        // Fetch with retry logic
+        const fetch = require('node-fetch');
+        
+        // Retry function for API calls
+        const fetchWithRetry = async (url, options = {}, maxRetries = 3) => {
+            let lastError;
+            for (let i = 0; i < maxRetries; i++) {
+                try {
+                    const response = await fetch(url, options);
+                    if (!response.ok) {
+                        const errorText = await response.text();
+                        throw new Error(`API error (${response.status}): ${errorText}`);
                     }
-                }
-                throw lastError;
-            };
-            
-            const quoteResponse = await fetchWithRetry(url);
-            
-            if (quoteResponse && quoteResponse.outAmount) {
-                const outputDecimals = this.bot.TOKEN_DECIMALS[outputToken] || 9;
-                const outputAmount = parseInt(quoteResponse.outAmount) / Math.pow(10, outputDecimals);
-                
-                console.log(chalk.green(`Enhanced quote received: ${amount} ${inputToken} -> ${outputAmount.toFixed(6)} ${outputToken}`));
-                
-                // Log detailed route information
-                if (quoteResponse.routePlan && quoteResponse.routePlan.length > 0) {
-                    console.log(chalk.blue('Route details:'));
-                    quoteResponse.routePlan.forEach((hop, index) => {
-                        console.log(`  Hop ${index+1}: ${hop.swapInfo?.label || 'Unknown'} (${hop.percent}%)`);
-                    });
+                    return await response.json();
+                } catch (error) {
+                    console.error(chalk.yellow(`Fetch attempt ${i + 1}/${maxRetries} failed:`, error.message));
+                    lastError = error;
+                    // Exponential backoff
+                    await new Promise(resolve => setTimeout(resolve, 500 * Math.pow(2, i)));
                 }
             }
+            throw lastError;
+        };
+        
+        const quoteResponse = await fetchWithRetry(url);
+        
+        if (quoteResponse && quoteResponse.outAmount) {
+            const outputDecimals = this.bot.TOKEN_DECIMALS[outputToken] || 9;
+            const outputAmount = parseInt(quoteResponse.outAmount) / Math.pow(10, outputDecimals);
             
-            return quoteResponse;
-        } catch (error) {
-            console.error(chalk.red('Error fetching optimized quote:'), error.message);
-            return null;
+            console.log(chalk.green(`Enhanced quote received: ${amount} ${inputToken} -> ${outputAmount.toFixed(6)} ${outputToken}`));
+            
+            // Log detailed route information
+            if (quoteResponse.routePlan && quoteResponse.routePlan.length > 0) {
+                console.log(chalk.blue('Route details:'));
+                quoteResponse.routePlan.forEach((hop, index) => {
+                    console.log(`  Hop ${index+1}: ${hop.swapInfo?.label || 'Unknown'} (${hop.percent}%)`);
+                });
+            }
+        }
+        
+        return quoteResponse;
+    } catch (error) {
+        console.error(chalk.red('Error fetching optimized quote:'), error.message);
+        return null;
         }
     }
 }
+
 
 // Export the enhanced strategy
 module.exports = EnhancedTradingStrategy;
