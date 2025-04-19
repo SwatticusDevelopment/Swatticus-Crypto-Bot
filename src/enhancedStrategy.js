@@ -339,201 +339,107 @@ class EnhancedTradingStrategy {
     }
 
     async processSuccessfulTrade(result, opportunity, slippageBps) {
-        this.totalTrades++;
-        
-        try {
-            if (result && result.success) {
-                this.successfulTrades++;
-                
-                // Calculate actual profit
-                let inputInSOL = 0;
-                
-                // Safely calculate inputInSOL
-                if (opportunity.inputToken === 'SOL') {
-                    inputInSOL = opportunity.suggestedAmount;
-                } else if (opportunity.currentPrice !== undefined && opportunity.currentPrice > 0) {
-                    inputInSOL = opportunity.suggestedAmount / opportunity.currentPrice;
-                } else {
-                    // Fallback if we can't calculate properly
-                    const solPrice = await this.getSOLPriceEstimate();
-                    inputInSOL = opportunity.suggestedAmount / solPrice;
-                }
-                
-                // Track actual SOL expenditure including transaction fee
-                const totalSolCost = inputInSOL + (opportunity.inputToken === 'SOL' ? this.transactionFee : 0);
-                
-                // For SOL output, calculate the realized profit immediately
-                let realizedProfit = 0;
-                
-                if (opportunity.outputToken === 'SOL') {
-                    // Direct profit calculation for SOL output
-                    realizedProfit = result.outputAmount - totalSolCost;
-                    
-                    // Track net profit after transaction fees
-                    const netProfit = realizedProfit - this.transactionFee;
-                    
-                    // Update realized profit
-                    if (netProfit > 0) {
-                        this.realizedProfitSOL += netProfit;
-                        
-                        // Track in bot state for UI display
-                        if (!this.bot.state.realizedProfit) {
-                            this.bot.state.realizedProfit = 0;
-                        }
-                        this.bot.state.realizedProfit += netProfit;
-                        
-                        // Record profit for hourly tracking
-                        this.recordProfit(netProfit);
-                    }
-                }
-                
-                // Log detailed information about the trade
-                console.log(chalk.green('=== Slippage Profit Analysis ==='));
-                
-                // Calculate what percentage of the slippage this profit represents
-                const slippagePercentage = slippageBps / 100;
-                const expectedProfitPercentage = Math.abs(opportunity.percentChange);
-                const profitToSlippageRatio = expectedProfitPercentage / slippagePercentage;
-                const percentOfSlippage = profitToSlippageRatio * 100;
-                
-                console.log(chalk.green(`Slippage used: ${slippagePercentage.toFixed(2)}%`));
-                console.log(chalk.green(`Expected profit: ${expectedProfitPercentage.toFixed(2)}% (${percentOfSlippage.toFixed(2)}% of slippage)`));
-                console.log(chalk.green(`Transaction fee: ~${this.transactionFee.toFixed(6)} SOL`));
-                
-                if (opportunity.outputToken === 'SOL') {
-                    const netProfit = realizedProfit - this.transactionFee;
-                    console.log(chalk.green(`Realized profit: ${realizedProfit.toFixed(6)} SOL`));
-                    console.log(chalk.green(`Net profit after fees: ${netProfit.toFixed(6)} SOL`));
-                } else {
-                    console.log(chalk.green(`Output token: ${result.outputAmount.toFixed(6)} ${opportunity.outputToken}`));
-                    console.log(chalk.green(`Consolidation needed: Will calculate final profit after conversion to SOL`));
-                }
-                
-                console.log(chalk.green('Trade executed successfully'));
-                console.log(`Transaction ID: ${result.txid}`);
-                
-                // Update success rate stats
-                const successRate = (this.successfulTrades / this.totalTrades) * 100;
-                console.log(chalk.blue(`Trade success rate: ${successRate.toFixed(1)}% (${this.successfulTrades}/${this.totalTrades})`));
-                
-                // Wait a moment for blockchain state to settle
-                await new Promise(resolve => setTimeout(resolve, 2000));
-                
-                // AUTOMATIC CONSOLIDATION: 
-                // Always consolidate after every trade if the output token is not SOL
-                let consolidationResult = null;
-                if (this.autoConsolidationEnabled && result.outputToken !== 'SOL' && result.outputAmount > 0) {
-                    console.log(chalk.blue(`🔄 Automatically consolidating profit to SOL...`));
-                    
-                    try {
-                        // Calculate consolidation amount (95% of the output to allow for fees)
-                        const consolidationAmount = result.outputAmount * 0.95;
-                        
-                        // Get a quote to convert from the output token to SOL
-                        console.log(chalk.blue(`Getting quote to convert ${consolidationAmount.toFixed(6)} ${result.outputToken} to SOL...`));
-                        
-                        const quoteData = await this.bot.getJupiterQuote(
-                            result.outputToken,
-                            'SOL',
-                            consolidationAmount
-                        );
-                        
-                        if (!quoteData || !quoteData.outAmount) {
-                            console.error(chalk.red(`Failed to get quote for ${result.outputToken} to SOL conversion`));
-                        } else {
-                            console.log(chalk.blue(`Quote received: ${consolidationAmount.toFixed(6)} ${result.outputToken} -> SOL`));
-                            
-                            // Execute the consolidation trade
-                            console.log(chalk.blue(`Executing consolidation trade...`));
-                            
-                            consolidationResult = await this.bot.executeJupiterSwap(
-                                quoteData,
-                                consolidationAmount,
-                                result.outputToken
-                            );
-                            
-                            if (consolidationResult && consolidationResult.success) {
-                                console.log(chalk.green(`✅ Profit successfully consolidated: ${consolidationResult.outputAmount.toFixed(6)} SOL`));
-                                console.log(`Consolidation Transaction ID: ${consolidationResult.txid}`);
-                                
-                                // Calculate net profit from the trade + consolidation sequence
-                                // Account for the additional transaction fee
-                                const netConsolidatedProfit = consolidationResult.outputAmount - this.transactionFee - totalSolCost;
-                                
-                                console.log(chalk.green(`Net profit after consolidation: ${netConsolidatedProfit.toFixed(6)} SOL`));
-                                
-                                // Only record positive profit
-                                if (netConsolidatedProfit > 0) {
-                                    this.realizedProfitSOL += netConsolidatedProfit;
-                                    
-                                    // Track in bot state for UI display
-                                    if (!this.bot.state.realizedProfit) {
-                                        this.bot.state.realizedProfit = 0;
-                                    }
-                                    this.bot.state.realizedProfit += netConsolidatedProfit;
-                                    
-                                    // Record profit for hourly tracking
-                                    this.recordProfit(netConsolidatedProfit);
-                                }
-                                
-                                // Update balances after consolidation
-                                await this.bot.getTokenBalances();
-                                
-                                // Update auto-consolidated profit tracker
-                                if (!this.bot.state.autoConsolidatedProfit) {
-                                    this.bot.state.autoConsolidatedProfit = 0;
-                                }
-                                this.bot.state.autoConsolidatedProfit += consolidationResult.outputAmount;
-                                
-                                // Log to dashboard
-                                this.bot.logToClientDashboard(`Profit consolidated: ${consolidationResult.outputAmount.toFixed(6)} SOL`, 'profit');
-                                
-                                // Broadcast the auto-consolidation update to clients
-                                if (this.bot.wsServer) {
-                                    this.bot.wsServer.clients.forEach((client) => {
-                                        if (client.readyState === WebSocket.OPEN) {
-                                            client.send(JSON.stringify({
-                                                type: 'auto_consolidation_update',
-                                                data: {
-                                                    consolidatedAmount: consolidationResult.outputAmount,
-                                                    fromToken: result.outputToken,
-                                                    toToken: 'SOL',
-                                                    totalConsolidated: this.bot.state.autoConsolidatedProfit || 0,
-                                                    netProfit: netConsolidatedProfit,
-                                                    txid: consolidationResult.txid,
-                                                    timestamp: Date.now()
-                                                },
-                                                balances: this.bot.state.balances
-                                            }));
-                                        }
-                                    });
-                                }
-                            } else {
-                                console.error(chalk.red(`Failed to consolidate profit to SOL`));
-                                this.failedTrades++;
-                            }
-                        }
-                    } catch (error) {
-                        console.error(chalk.red('Error during automatic profit consolidation:'), error);
-                        this.failedTrades++;
-                    }
-                } else {
-                    console.log(chalk.blue(`Output already in SOL, no consolidation needed.`));
-                }
-                
-                return true;
-            } else {
-                console.log(chalk.red('Enhanced trade execution failed'));
-                this.failedTrades++;
-                return false;
-            }
-        } catch (error) {
-            console.error(chalk.red('Error processing successful trade:'), error);
-            this.failedTrades++;
-            return false;
-        }
-    }
-    
+      this.totalTrades++;
+      
+      try {
+          if (result && result.success) {
+              this.successfulTrades++;
+              
+              // Calculate actual profit
+              let inputInSOL = 0;
+              
+              // Safely calculate inputInSOL
+              if (opportunity.inputToken === 'SOL') {
+                  inputInSOL = opportunity.suggestedAmount;
+              } else if (opportunity.currentPrice !== undefined && opportunity.currentPrice > 0) {
+                  inputInSOL = opportunity.suggestedAmount / opportunity.currentPrice;
+              } else {
+                  // Fallback if we can't calculate properly
+                  const solPrice = await this.getSOLPriceEstimate();
+                  inputInSOL = opportunity.suggestedAmount / solPrice;
+              }
+              
+              // Track actual SOL expenditure including transaction fee
+              const totalSolCost = inputInSOL + (opportunity.inputToken === 'SOL' ? this.transactionFee : 0);
+              
+              // For SOL output, calculate the realized profit immediately
+              let realizedProfit = 0;
+              
+              if (opportunity.outputToken === 'SOL') {
+                  // Direct profit calculation for SOL output
+                  realizedProfit = result.outputAmount - totalSolCost;
+                  
+                  // Track net profit after transaction fees
+                  const netProfit = realizedProfit - this.transactionFee;
+                  
+                  // Update realized profit
+                  if (netProfit > 0) {
+                      this.realizedProfitSOL += netProfit;
+                      
+                      // Track in bot state for UI display
+                      if (!this.bot.state.realizedProfit) {
+                          this.bot.state.realizedProfit = 0;
+                      }
+                      this.bot.state.realizedProfit += netProfit;
+                      
+                      // Record profit for hourly tracking
+                      this.recordProfit(netProfit);
+                  }
+              }
+              
+              // Log detailed information about the trade
+              console.log(chalk.green('=== Slippage Profit Analysis ==='));
+              
+              // Calculate what percentage of the slippage this profit represents
+              const slippagePercentage = slippageBps / 100;
+              const expectedProfitPercentage = Math.abs(opportunity.percentChange);
+              const profitToSlippageRatio = expectedProfitPercentage / slippagePercentage;
+              const percentOfSlippage = profitToSlippageRatio * 100;
+              
+              console.log(chalk.green(`Slippage used: ${slippagePercentage.toFixed(2)}%`));
+              console.log(chalk.green(`Expected profit: ${expectedProfitPercentage.toFixed(2)}% (${percentOfSlippage.toFixed(2)}% of slippage)`));
+              console.log(chalk.green(`Transaction fee: ~${this.transactionFee.toFixed(6)} SOL`));
+              
+              if (opportunity.outputToken === 'SOL') {
+                  const netProfit = realizedProfit - this.transactionFee;
+                  console.log(chalk.green(`Realized profit: ${realizedProfit.toFixed(6)} SOL`));
+                  console.log(chalk.green(`Net profit after fees: ${netProfit.toFixed(6)} SOL`));
+              } else {
+                  console.log(chalk.green(`Output token: ${result.outputAmount.toFixed(6)} ${opportunity.outputToken}`));
+                  console.log(chalk.green(`Consolidation needed: Will calculate final profit after hourly conversion to SOL`));
+              }
+              
+              console.log(chalk.green('Trade executed successfully'));
+              console.log(`Transaction ID: ${result.txid}`);
+              
+              // Update success rate stats
+              const successRate = (this.successfulTrades / this.totalTrades) * 100;
+              console.log(chalk.blue(`Trade success rate: ${successRate.toFixed(1)}% (${this.successfulTrades}/${this.totalTrades})`));
+              
+              // Wait a moment for blockchain state to settle
+              await new Promise(resolve => setTimeout(resolve, 2000));
+              
+              // IMPORTANT: DISABLE AUTOMATIC CONSOLIDATION AFTER EVERY TRADE
+              // We will let the hourly consolidation take care of this
+              
+              // Log to dashboard that auto-consolidation is disabled for this trade
+              this.bot.logToClientDashboard(
+                  `Trade completed successfully: ${result.outputAmount.toFixed(6)} ${opportunity.outputToken}. Auto-consolidation scheduled hourly.`, 
+                  'success'
+              );
+              
+              return true;
+          } else {
+              console.log(chalk.red('Enhanced trade execution failed'));
+              this.failedTrades++;
+              return false;
+          }
+      } catch (error) {
+          console.error(chalk.red('Error processing successful trade:'), error);
+          this.failedTrades++;
+          return false;
+      }
+  }
 
     /**
      * Update price tracking without full opportunity detection
@@ -1012,49 +918,48 @@ calculateOptimalSlippage(opportunity) {
 }
 
 validateProfitToSlippageRatio(opportunity, slippageBps) {
+  if (opportunity.potentialProfit < 0.001) {
+      console.log(chalk.red(`Profit too small: ${opportunity.potentialProfit.toFixed(6)} SOL`));
+      return false;
+  }
     
-    if (opportunity.potentialProfit < 0.001) {
-        console.log(chalk.red(`Profit too small: ${opportunity.potentialProfit.toFixed(6)} SOL`));
-        return false;
-      }
-      
-    // Calculate the slippage percentage (bps / 100)
-    const slippagePercentage = slippageBps / 100;
-    
-    // Calculate the minimum required profit (50% of slippage - increased from 25%)
-    const minRequiredProfit = slippagePercentage * 0.5;
-    
-    // Get the estimated profit percentage
-    const estimatedProfitPercentage = Math.abs(opportunity.percentChange || 0);
-    
-    // Calculate network fee as a percentage 
-    const feePercentage = opportunity.feePercentage || 0;
-    
-    // Net profit after fee
-    const netProfitPercentage = estimatedProfitPercentage - feePercentage;
-    
-    // Calculate what percentage of slippage this profit represents
-    const profitToSlippageRatio = netProfitPercentage / slippagePercentage;
-    const percentOfSlippage = profitToSlippageRatio * 100;
-    
-    // Log the validation details
-    console.log(chalk.blue(`Slippage Profit Validation:`));
-    console.log(chalk.blue(`- Max slippage: ${slippagePercentage.toFixed(2)}%`));
-    console.log(chalk.blue(`- Required min profit (50% of slippage): ${minRequiredProfit.toFixed(2)}%`));
-    console.log(chalk.blue(`- Transaction fee: ~${feePercentage.toFixed(4)}% of trade amount`));
-    console.log(chalk.blue(`- Estimated gross profit: ${estimatedProfitPercentage.toFixed(2)}%`));
-    console.log(chalk.blue(`- Estimated net profit: ${netProfitPercentage.toFixed(2)}%`));
-    console.log(chalk.blue(`- Net profit is ${percentOfSlippage.toFixed(2)}% of max slippage`));
-    
-    // Return validation result (true if profit is at least 50% of slippage after fees)
-    const isValid = netProfitPercentage >= minRequiredProfit;
-    
-    if (isValid) {
-        console.log(chalk.green(`✅ Trade passes 50% profit-to-slippage requirement after fees`));
-    } else {
-        console.log(chalk.red(`❌ Trade fails 50% profit-to-slippage requirement after fees - skipping`));
-    }
-    return originalValidation;
+  // Calculate the slippage percentage (bps / 100)
+  const slippagePercentage = slippageBps / 100;
+  
+  // Calculate the minimum required profit (50% of slippage - increased from 25%)
+  const minRequiredProfit = slippagePercentage * 0.5;
+  
+  // Get the estimated profit percentage
+  const estimatedProfitPercentage = Math.abs(opportunity.percentChange || 0);
+  
+  // Calculate network fee as a percentage 
+  const feePercentage = opportunity.feePercentage || 0;
+  
+  // Net profit after fee
+  const netProfitPercentage = estimatedProfitPercentage - feePercentage;
+  
+  // Calculate what percentage of slippage this profit represents
+  const profitToSlippageRatio = netProfitPercentage / slippagePercentage;
+  const percentOfSlippage = profitToSlippageRatio * 100;
+  
+  // Log the validation details
+  console.log(chalk.blue(`Slippage Profit Validation:`));
+  console.log(chalk.blue(`- Max slippage: ${slippagePercentage.toFixed(2)}%`));
+  console.log(chalk.blue(`- Required min profit (50% of slippage): ${minRequiredProfit.toFixed(2)}%`));
+  console.log(chalk.blue(`- Transaction fee: ~${feePercentage.toFixed(4)}% of trade amount`));
+  console.log(chalk.blue(`- Estimated gross profit: ${estimatedProfitPercentage.toFixed(2)}%`));
+  console.log(chalk.blue(`- Estimated net profit: ${netProfitPercentage.toFixed(2)}%`));
+  console.log(chalk.blue(`- Net profit is ${percentOfSlippage.toFixed(2)}% of max slippage`));
+  
+  // Return validation result (true if profit is at least 50% of slippage after fees)
+  const isValid = netProfitPercentage >= minRequiredProfit;
+  
+  if (isValid) {
+      console.log(chalk.green(`✅ Trade passes 50% profit-to-slippage requirement after fees`));
+  } else {
+      console.log(chalk.red(`❌ Trade fails 50% profit-to-slippage requirement after fees - skipping`));
+  }
+  return isValid; // <-- Fixed: was returning undeclared originalValidation variable
 }
 
 /**

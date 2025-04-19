@@ -53,6 +53,10 @@ const { httpAgent, httpsAgent } = createAgents();
             aggressiveMode: false, // Always use aggressive mode for active trading
             routingMode: process.env.ROUTING_MODE,
             maxPriceDifferencePercent: parseFloat(process.env.MAX_PRICE_DIFFERENCE_PERCENT),
+            consolidationInterval: parseInt(process.env.CONSOLIDATION_INTERVAL) || 60, // Minutes between auto-consolidations (default 60)
+            minAmountToConsolidate: parseFloat(process.env.MIN_AMOUNT_TO_CONSOLIDATE) || 0.01, // Minimum token amount to consolidate
+            autoConsolidation: process.env.AUTO_CONSOLIDATION !== 'false', // Enable/disable auto-consolidation
+            consolidationThreshold: parseFloat(process.env.CONSOLIDATION_THRESHOLD) || 0.005, // Min SOL profit before consolidating        
             ignorePriceDifference: process.env.IGNORE_PRICE_DIFFERENCE === 'false'
         };
 

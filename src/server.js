@@ -1078,7 +1078,7 @@ for (let i = 0; i < rpcEndpoints.length; i++) {
     async consolidateTradeProfit() {
         try {
             console.log(chalk.green('========================================'));
-            console.log(chalk.green('CONSOLIDATING PROFIT TO MAIN WALLET'));
+            console.log(chalk.green('ANALYZING MARKET BEFORE CONSOLIDATION'));
             console.log(chalk.green('========================================'));
             
             // 1. Get all token balances
@@ -1093,20 +1093,56 @@ for (let i = 0; i < rpcEndpoints.length; i++) {
             // 2. Fetch current prices to determine optimal consolidation strategy
             const prices = this.tradingBot ? await this.tradingBot.fetchCurrentPrices() : {};
             
+            // Skip consolidation if there's a large negative price movement for SOL
+            if (this.tradingBot && this.tradingBot.enhancedStrategy && 
+                this.tradingBot.enhancedStrategy.priceHistory && 
+                this.tradingBot.enhancedStrategy.priceHistory['SOL/USDC']) {
+                    
+                const solHistory = this.tradingBot.enhancedStrategy.priceHistory['SOL/USDC'];
+                if (solHistory.length >= 5) {
+                    const latestPrice = solHistory[solHistory.length - 1].price;
+                    const previousPrice = solHistory[0].price;
+                    const percentChange = ((latestPrice - previousPrice) / previousPrice) * 100;
+                    
+                    // If SOL price is dropping significantly, postpone consolidation
+                    if (percentChange < -1.5) {
+                        console.log(chalk.yellow(`Postponing consolidation due to SOL price drop (${percentChange.toFixed(2)}%)`));
+                        console.log(chalk.yellow(`Will retry during next scheduled consolidation`));
+                        return false;
+                    }
+                }
+            }
+            
             // 3. Find tokens with non-SOL balances that can be converted to SOL
             const tokensToConsolidate = [];
+            const minAmountToConsolidate = this.tradingBot.config.minAmountToConsolidate || 0.01;
+            
             for (const [token, amount] of Object.entries(this.serverState.balances)) {
-                // Skip SOL and tokens with very small balances
-                if (token === 'SOL' || amount < 0.000001) continue;
+                // Skip SOL and tokens with balances below threshold
+                if (token === 'SOL' || amount < minAmountToConsolidate) continue;
                 
                 // Check if we have a trading pair for this token to SOL
                 const pairToSOL = `${token}/SOL`;
-                if (this.tradingBot.tradingPairs.includes(pairToSOL) && amount > 0.01) {
-                    tokensToConsolidate.push({
-                        token,
-                        amount,
-                        pair: pairToSOL
-                    });
+                if (this.tradingBot.tradingPairs.includes(pairToSOL) && amount > minAmountToConsolidate) {
+                    // Calculate estimated SOL value
+                    let estimatedSolValue = amount;
+                    
+                    // If price data available, use it to estimate SOL value
+                    if (prices[pairToSOL] && prices[pairToSOL].price) {
+                        estimatedSolValue = amount * prices[pairToSOL].price;
+                    }
+                    
+                    // Only consolidate if estimated value exceeds threshold
+                    if (estimatedSolValue >= (this.tradingBot.config.consolidationThreshold || 0.005)) {
+                        tokensToConsolidate.push({
+                            token,
+                            amount,
+                            pair: pairToSOL,
+                            estimatedSolValue
+                        });
+                    } else {
+                        console.log(chalk.yellow(`Skipping ${token} consolidation: estimated value (${estimatedSolValue.toFixed(6)} SOL) below threshold`));
+                    }
                 }
             }
             
@@ -1114,7 +1150,7 @@ for (let i = 0; i < rpcEndpoints.length; i++) {
             if (tokensToConsolidate.length > 0) {
                 console.log(chalk.green('Found tokens to consolidate into SOL:'));
                 tokensToConsolidate.forEach(info => {
-                    console.log(chalk.green(`- ${info.amount.toFixed(6)} ${info.token} via ${info.pair}`));
+                    console.log(chalk.green(`- ${info.amount.toFixed(6)} ${info.token} (~${info.estimatedSolValue.toFixed(6)} SOL) via ${info.pair}`));
                 });
                 
                 // 4. Execute consolidation trades for each token
@@ -1136,7 +1172,18 @@ for (let i = 0; i < rpcEndpoints.length; i++) {
                         continue;
                     }
                     
-                    console.log(chalk.yellow(`Converting ${tradeAmount.toFixed(6)} ${info.token} to SOL...`));
+                    // Calculate expected SOL output
+                    const outputDecimals = this.tradingBot.TOKEN_DECIMALS['SOL'] || 9;
+                    const expectedOutput = parseInt(quoteData.outAmount) / Math.pow(10, outputDecimals);
+                    
+                    // Verify quote is reasonable (within 5% of estimated value)
+                    const priceDifference = Math.abs((expectedOutput - info.estimatedSolValue) / info.estimatedSolValue) * 100;
+                    if (priceDifference > 5) {
+                        console.log(chalk.red(`Quote price deviates too much from expected: ${priceDifference.toFixed(2)}%. Skipping for safety.`));
+                        continue;
+                    }
+                    
+                    console.log(chalk.yellow(`Converting ${tradeAmount.toFixed(6)} ${info.token} to approximately ${expectedOutput.toFixed(6)} SOL...`));
                     
                     const result = await this.tradingBot.executeJupiterSwap(
                         quoteData,
@@ -1177,7 +1224,7 @@ for (let i = 0; i < rpcEndpoints.length; i++) {
                     type: 'profit_consolidation',
                     balances: this.serverState.balances,
                     totalSolEquivalent: totalSolEquivalent,
-                    message: 'Profit consolidation completed'
+                    message: 'Scheduled profit consolidation completed'
                 });
                 
                 return true;
@@ -1193,8 +1240,8 @@ for (let i = 0; i < rpcEndpoints.length; i++) {
     
     // Add this method to automatically run consolidation periodically
     setupProfitConsolidation() {
-        // Run consolidation every 15 minutes
-        const consolidationInterval = 15 * 60 * 1000;
+        // Run consolidation every 60 minutes instead of every 15 minutes
+        const consolidationInterval = 60 * 60 * 1000; // 60 minutes in milliseconds
         
         this.intervals.profitConsolidation = setInterval(async () => {
             try {
