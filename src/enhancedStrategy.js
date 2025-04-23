@@ -315,6 +315,243 @@ class EnhancedTradingStrategy {
         }
       }
 
+      async executeJupiterSwapWithHighPriority(quoteData, amount, inputToken) {
+        try {
+          console.log(`Preparing high-priority swap: ${amount} ${inputToken}...`);
+          
+          // Use maximum compute units and higher priority fee
+          const swapRequest = {
+            userPublicKey: this.state.wallet.publicKey.toString(),
+            wrapUnwrapSOL: true,
+            useVersionedTransaction: true,
+            quoteResponse: quoteData,
+            computeUnitPriceMicroLamports: 25000, // Use higher priority fee (2.5x increase)
+            maxComputeUnits: 1000000, // Maximum compute units
+            dynamicComputeUnitLimit: true, // Allow adjustment
+            prioritizationFeeLamports: 50000 // 0.00005 SOL priority fee (5x increase)
+          };
+          
+          const response = await fetch('https://quote-api.jup.ag/v6/swap', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(swapRequest)
+          });
+          
+          if (!response.ok) {
+            const errorText = await response.text();
+            console.error(`Jupiter API error (${response.status}): ${errorText}`);
+            return false;
+          }
+          
+          const swapResponse = await response.json();
+          
+          if (!swapResponse || !swapResponse.swapTransaction) {
+            console.error(`Failed to get swap transaction: ${JSON.stringify(swapResponse)}`);
+            return false;
+          }
+          
+          console.log('Swap transaction prepared by Jupiter. Proceeding with signing and sending...');
+          
+          const transactionBuffer = Buffer.from(swapResponse.swapTransaction, 'base64');
+          const transaction = VersionedTransaction.deserialize(transactionBuffer);
+          
+          console.log('Transaction deserialized successfully. Signing...');
+          
+          transaction.sign([this.state.wallet]);
+          
+          console.log('Transaction signed. Sending to Solana with high priority...');
+          
+          // Set up retry logic for sending transaction
+          let txid = null;
+          let retriesLeft = 5; // Increased retries
+          
+          while (retriesLeft > 0 && !txid) {
+            try {
+              txid = await this.state.connection.sendTransaction(transaction, {
+                skipPreflight: false, // Enable preflight for better error checking
+                maxRetries: 5,        // Increased retries
+                preflightCommitment: 'confirmed'
+              });
+              
+              console.log(`Transaction sent with high priority: ${txid}`);
+              break;
+            } catch (sendError) {
+              retriesLeft--;
+              console.error(`Error sending transaction (${retriesLeft} retries left):`, sendError.message);
+              
+              if (retriesLeft <= 0) {
+                throw sendError;
+              }
+              
+              // Wait before retry with exponential backoff but shorter intervals
+              await new Promise(resolve => setTimeout(resolve, 500 * Math.pow(2, 5 - retriesLeft)));
+            }
+          }
+          
+          if (!txid) {
+            throw new Error('Failed to send transaction after multiple retries');
+          }
+          
+          console.log('Waiting for confirmation with extended timeout...');
+          
+          // Use a more robust confirmation strategy with longer timeout
+          try {
+            const confirmation = await this.state.connection.confirmTransaction(
+              {
+                signature: txid, 
+                blockhash: transaction.message.recentBlockhash, 
+                lastValidBlockHeight: 150000000
+              },
+              'confirmed'
+            );
+            
+            if (confirmation.value.err) {
+              console.error(`Transaction failed: ${JSON.stringify(confirmation.value.err)}`);
+              return false;
+            }
+            
+            console.log(`Transaction confirmed successfully!`);
+          } catch (confirmError) {
+            console.error(`Confirmation timeout, checking transaction status directly...`);
+            
+            // Enhanced transaction status checker with more retries
+            const status = await this.checkTransactionStatusExtended(txid, 10);
+            
+            if (!status.success) {
+              console.error(`Transaction failed: ${status.error || 'Unknown error'}`);
+              return false;
+            }
+            
+            console.log(`Transaction confirmed with manual status check!`);
+          }
+          
+          // Get output token name and amount information from the quote
+          const outputMint = quoteData.outputMint;
+          const outputTokenName = this.getTokenNameByAddress(outputMint) || 'Unknown';
+          const outputDecimals = this.TOKEN_DECIMALS[outputTokenName] || 9;
+          const outputAmount = parseInt(quoteData.outAmount) / Math.pow(10, outputDecimals);
+          
+          console.log(`Swap details: ${amount} ${inputToken} -> ${outputAmount.toFixed(6)} ${outputTokenName}`);
+          
+          // Add delay after transaction to ensure blockchain state is updated
+          console.log('Transaction confirmed, waiting for blockchain state update...');
+          await new Promise(resolve => setTimeout(resolve, 10000)); // 10 seconds wait
+          
+          // Force a balance refresh to get updated balances
+          await this.refreshWalletBalances(true);
+          
+          // Return success with transaction details
+          const result = {
+            success: true,
+            txid,
+            inputAmount: amount,
+            outputAmount,
+            inputToken,
+            outputToken: outputTokenName
+          };
+          
+          return result;
+        } catch (error) {
+          console.error('Error executing high-priority swap:', error);
+          
+          // Send detailed error to logs
+          console.error('Error details:', error.stack);
+          
+          // Try to recover from RPC errors
+          if (error.message && (
+              error.message.includes('network') || 
+              error.message.includes('timeout') || 
+              error.message.includes('rate limit')
+          )) {
+            console.log('Attempting to reconnect to RPC endpoint...');
+            try {
+              await this.setupConnection();
+            } catch (connError) {
+              console.error('Failed to reconnect:', connError);
+            }
+          }
+          
+          return false;
+        }
+      }
+
+      async getJupiterQuoteForConsolidation(inputToken, outputToken, amount, slippageBps, directRoutePreferred) {
+        try {
+          const inputDecimals = this.TOKEN_DECIMALS[inputToken] || 9;
+          const inputAmountLamports = Math.floor(amount * Math.pow(10, inputDecimals));
+          
+          // Enhanced quote parameters for consolidation
+          const params = new URLSearchParams({
+            inputMint: this.TOKEN_ADDRESSES[inputToken],
+            outputMint: this.TOKEN_ADDRESSES[outputToken],
+            amount: inputAmountLamports.toString(),
+            slippageBps: slippageBps.toString(),
+            onlyDirectRoutes: directRoutePreferred.toString(),
+            asLegacyTransaction: 'false',
+            computeUnitPriceMicroLamports: '20000' // Higher compute unit price for consolidation
+          });
+          
+          const url = `https://quote-api.jup.ag/v6/quote?${params.toString()}`;
+          
+          console.log(`Requesting optimized Jupiter quote for consolidation: ${url}`);
+          
+          // Implement retry logic with 5 second timeout
+          const fetchWithRetry = async (url, retries = 3) => {
+            for (let i = 0; i < retries; i++) {
+              try {
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 5000);
+                
+                const response = await fetch(url, { signal: controller.signal });
+                clearTimeout(timeoutId);
+                
+                if (!response.ok) {
+                  const errorText = await response.text();
+                  throw new Error(`HTTP error ${response.status}: ${errorText}`);
+                }
+                
+                return await response.json();
+              } catch (error) {
+                console.error(`Quote fetch attempt ${i+1}/${retries} failed:`, error.message);
+                
+                if (i === retries - 1) throw error;
+                
+                // Wait before retry with exponential backoff
+                const delay = Math.min(5000, 1000 * Math.pow(2, i));
+                console.log(`Retrying in ${delay}ms...`);
+                await new Promise(resolve => setTimeout(resolve, delay));
+              }
+            }
+          };
+          
+          const quoteData = await fetchWithRetry(url);
+          
+          // Validate quote data
+          if (!quoteData || !quoteData.outAmount) {
+            throw new Error('Invalid quote data returned');
+          }
+          
+          // Calculate and log the expected output
+          const outputDecimals = this.TOKEN_DECIMALS[outputToken] || 9;
+          const outputAmount = parseInt(quoteData.outAmount) / Math.pow(10, outputDecimals);
+          
+          console.log(`Consolidation quote received: ${amount} ${inputToken} -> ${outputAmount.toFixed(6)} ${outputToken}`);
+          
+          // Log route information if available
+          if (quoteData.routePlan && quoteData.routePlan.length > 0) {
+            console.log('Consolidation route details:');
+            quoteData.routePlan.forEach((hop, index) => {
+              console.log(`  Hop ${index+1}: ${hop.swapInfo?.label || 'Unknown'} (${hop.percent}%)`);
+            });
+          }
+          
+          return quoteData;
+        } catch (error) {
+          console.error('Error getting consolidation quote:', error);
+          return null;
+        }
+      }
+
     setupOpportunityDetection() {
         // Create volatility detection log
         const logDir = path.join(__dirname, 'logs');
@@ -342,104 +579,75 @@ class EnhancedTradingStrategy {
       this.totalTrades++;
       
       try {
-          if (result && result.success) {
-              this.successfulTrades++;
+        if (result && result.success) {
+          this.successfulTrades++;
+          
+          // Record profit for tracking
+          this.recordProfit(/* profit calculations */);
+          
+          // IMMEDIATE CONSOLIDATION - Immediately convert any non-SOL tokens back to SOL
+          if (opportunity.outputToken !== 'SOL') {
+            console.log('Auto-consolidating trade profits to SOL immediately...');
+            
+            // Wait for blockchain state to settle before consolidation
+            await new Promise(resolve => setTimeout(resolve, 5000));
+            
+            // Refresh balances to get updated token amounts
+            await this.refreshWalletBalances(true);
+            
+            // Get current balance of output token
+            const tokenBalance = this.serverState.balances[opportunity.outputToken] || 0;
+            
+            if (tokenBalance > 0.005) { // Minimum amount to consolidate
+              // Calculate 90% of balance to use for consolidation
+              const consolidationAmount = tokenBalance * 0.9;
               
-              // Calculate actual profit
-              let inputInSOL = 0;
-              
-              // Safely calculate inputInSOL
-              if (opportunity.inputToken === 'SOL') {
-                  inputInSOL = opportunity.suggestedAmount;
-              } else if (opportunity.currentPrice !== undefined && opportunity.currentPrice > 0) {
-                  inputInSOL = opportunity.suggestedAmount / opportunity.currentPrice;
-              } else {
-                  // Fallback if we can't calculate properly
-                  const solPrice = await this.getSOLPriceEstimate();
-                  inputInSOL = opportunity.suggestedAmount / solPrice;
-              }
-              
-              // Track actual SOL expenditure including transaction fee
-              const totalSolCost = inputInSOL + (opportunity.inputToken === 'SOL' ? this.transactionFee : 0);
-              
-              // For SOL output, calculate the realized profit immediately
-              let realizedProfit = 0;
-              
-              if (opportunity.outputToken === 'SOL') {
-                  // Direct profit calculation for SOL output
-                  realizedProfit = result.outputAmount - totalSolCost;
+              // Execute consolidation with multiple retries
+              for (let attempt = 0; attempt < 3; attempt++) {
+                try {
+                  const slippage = 500 + (attempt * 100); // Increase slippage with each attempt
                   
-                  // Track net profit after transaction fees
-                  const netProfit = realizedProfit - this.transactionFee;
+                  // Get quote for consolidation
+                  const consolidationQuote = await this.getJupiterQuoteForConsolidation(
+                    opportunity.outputToken,
+                    'SOL',
+                    consolidationAmount,
+                    slippage,
+                    true
+                  );
                   
-                  // Update realized profit
-                  if (netProfit > 0) {
-                      this.realizedProfitSOL += netProfit;
-                      
-                      // Track in bot state for UI display
-                      if (!this.bot.state.realizedProfit) {
-                          this.bot.state.realizedProfit = 0;
-                      }
-                      this.bot.state.realizedProfit += netProfit;
-                      
-                      // Record profit for hourly tracking
-                      this.recordProfit(netProfit);
+                  if (!consolidationQuote) continue;
+                  
+                  // Execute consolidation
+                  const consolidationResult = await this.executeJupiterSwapWithHighPriority(
+                    consolidationQuote,
+                    consolidationAmount,
+                    opportunity.outputToken
+                  );
+                  
+                  if (consolidationResult && consolidationResult.success) {
+                    console.log(`✅ Profit consolidated: ${consolidationResult.outputAmount.toFixed(6)} SOL`);
+                    break;
                   }
+                } catch (error) {
+                  console.error(`Consolidation attempt ${attempt+1} failed:`, error);
+                }
               }
-              
-              // Log detailed information about the trade
-              console.log(chalk.green('=== Slippage Profit Analysis ==='));
-              
-              // Calculate what percentage of the slippage this profit represents
-              const slippagePercentage = slippageBps / 100;
-              const expectedProfitPercentage = Math.abs(opportunity.percentChange);
-              const profitToSlippageRatio = expectedProfitPercentage / slippagePercentage;
-              const percentOfSlippage = profitToSlippageRatio * 100;
-              
-              console.log(chalk.green(`Slippage used: ${slippagePercentage.toFixed(2)}%`));
-              console.log(chalk.green(`Expected profit: ${expectedProfitPercentage.toFixed(2)}% (${percentOfSlippage.toFixed(2)}% of slippage)`));
-              console.log(chalk.green(`Transaction fee: ~${this.transactionFee.toFixed(6)} SOL`));
-              
-              if (opportunity.outputToken === 'SOL') {
-                  const netProfit = realizedProfit - this.transactionFee;
-                  console.log(chalk.green(`Realized profit: ${realizedProfit.toFixed(6)} SOL`));
-                  console.log(chalk.green(`Net profit after fees: ${netProfit.toFixed(6)} SOL`));
-              } else {
-                  console.log(chalk.green(`Output token: ${result.outputAmount.toFixed(6)} ${opportunity.outputToken}`));
-                  console.log(chalk.green(`Consolidation needed: Will calculate final profit after hourly conversion to SOL`));
-              }
-              
-              console.log(chalk.green('Trade executed successfully'));
-              console.log(`Transaction ID: ${result.txid}`);
-              
-              // Update success rate stats
-              const successRate = (this.successfulTrades / this.totalTrades) * 100;
-              console.log(chalk.blue(`Trade success rate: ${successRate.toFixed(1)}% (${this.successfulTrades}/${this.totalTrades})`));
-              
-              // Wait a moment for blockchain state to settle
-              await new Promise(resolve => setTimeout(resolve, 2000));
-              
-              // IMPORTANT: DISABLE AUTOMATIC CONSOLIDATION AFTER EVERY TRADE
-              // We will let the hourly consolidation take care of this
-              
-              // Log to dashboard that auto-consolidation is disabled for this trade
-              this.bot.logToClientDashboard(
-                  `Trade completed successfully: ${result.outputAmount.toFixed(6)} ${opportunity.outputToken}. Auto-consolidation scheduled hourly.`, 
-                  'success'
-              );
-              
-              return true;
-          } else {
-              console.log(chalk.red('Enhanced trade execution failed'));
-              this.failedTrades++;
-              return false;
+            }
           }
-      } catch (error) {
-          console.error(chalk.red('Error processing successful trade:'), error);
+          
+          return true;
+        } else {
+          console.log(chalk.red('Enhanced trade execution failed'));
           this.failedTrades++;
           return false;
+        }
+      } catch (error) {
+        console.error(chalk.red('Error processing successful trade:'), error);
+        this.failedTrades++;
+        return false;
       }
-  }
+    }
 
     /**
      * Update price tracking without full opportunity detection
@@ -917,51 +1125,105 @@ calculateOptimalSlippage(opportunity) {
     return Math.floor(baseSlippage * 0.9); // Generally more conservative
 }
 
-validateProfitToSlippageRatio(opportunity, slippageBps) {
-  if (opportunity.potentialProfit < 0.001) {
-      console.log(chalk.red(`Profit too small: ${opportunity.potentialProfit.toFixed(6)} SOL`));
-      return false;
-  }
-    
-  // Calculate the slippage percentage (bps / 100)
-  const slippagePercentage = slippageBps / 100;
-  
-  // Calculate the minimum required profit (50% of slippage - increased from 25%)
-  const minRequiredProfit = slippagePercentage * 0.5;
-  
-  // Get the estimated profit percentage
-  const estimatedProfitPercentage = Math.abs(opportunity.percentChange || 0);
-  
-  // Calculate network fee as a percentage 
-  const feePercentage = opportunity.feePercentage || 0;
-  
-  // Net profit after fee
-  const netProfitPercentage = estimatedProfitPercentage - feePercentage;
-  
-  // Calculate what percentage of slippage this profit represents
-  const profitToSlippageRatio = netProfitPercentage / slippagePercentage;
-  const percentOfSlippage = profitToSlippageRatio * 100;
-  
-  // Log the validation details
-  console.log(chalk.blue(`Slippage Profit Validation:`));
-  console.log(chalk.blue(`- Max slippage: ${slippagePercentage.toFixed(2)}%`));
-  console.log(chalk.blue(`- Required min profit (50% of slippage): ${minRequiredProfit.toFixed(2)}%`));
-  console.log(chalk.blue(`- Transaction fee: ~${feePercentage.toFixed(4)}% of trade amount`));
-  console.log(chalk.blue(`- Estimated gross profit: ${estimatedProfitPercentage.toFixed(2)}%`));
-  console.log(chalk.blue(`- Estimated net profit: ${netProfitPercentage.toFixed(2)}%`));
-  console.log(chalk.blue(`- Net profit is ${percentOfSlippage.toFixed(2)}% of max slippage`));
-  
-  // Return validation result (true if profit is at least 50% of slippage after fees)
-  const isValid = netProfitPercentage >= minRequiredProfit;
-  
-  if (isValid) {
-      console.log(chalk.green(`✅ Trade passes 50% profit-to-slippage requirement after fees`));
-  } else {
-      console.log(chalk.red(`❌ Trade fails 50% profit-to-slippage requirement after fees - skipping`));
-  }
-  return isValid; // <-- Fixed: was returning undeclared originalValidation variable
-}
 
+
+validateProfitToSlippageRatio(opportunity, slippageBps) {
+    // Calculate minimum required GUARANTEED profit (75% of slippage - increased from 50%)
+    const slippagePercentage = slippageBps / 100;
+    const minRequiredProfit = slippagePercentage * 0.75;
+    
+    // Get the estimated profit percentage
+    const estimatedProfitPercentage = Math.abs(opportunity.percentChange || 0);
+    
+    // Calculate network fee as a percentage with HIGHER estimate
+    const feePercentage = (opportunity.feePercentage || 0) * 1.5; // 50% buffer on fee estimation
+    
+    // Net profit after fee with safety margin
+    const netProfitPercentage = estimatedProfitPercentage * 0.9 - feePercentage; // 10% safety buffer
+    
+    // Calculate what percentage of slippage this profit represents
+    const profitToSlippageRatio = netProfitPercentage / slippagePercentage;
+    
+    // Only proceed if profit is at least 75% of slippage after fees with safety margin
+    return netProfitPercentage >= minRequiredProfit;
+  }
+
+  async consolidateTradeProfit() {
+    try {
+      console.log('Analyzing market before consolidation...');
+      
+      // 1. Get all token balances
+      await this.refreshWalletBalances(true);
+      
+      // 2. Find tokens with non-SOL balances that can be converted to SOL
+      const tokensToConsolidate = [];
+      const minAmountToConsolidate = 0.005; // Lower threshold to ensure small profits are captured
+      
+      for (const [token, amount] of Object.entries(this.serverState.balances)) {
+        // Skip SOL and tokens with balances below threshold
+        if (token === 'SOL' || amount < minAmountToConsolidate) continue;
+        
+        // Always attempt to consolidate any non-SOL token balance
+        tokensToConsolidate.push({
+          token,
+          amount,
+          pair: `${token}/SOL`
+        });
+      }
+      
+      // 3. Execute consolidation trades with multiple retries and safety checks
+      for (const info of tokensToConsolidate) {
+        console.log(`Consolidating ${info.amount.toFixed(6)} ${info.token} to SOL...`);
+        
+        // Multiple retry attempts with different slippage values
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try {
+            // Use more conservative amounts - use 90% of balance to account for fees
+            const tradeAmount = info.amount * 0.9;
+            
+            // Increase slippage tolerance for consolidation
+            const slippageBps = 500 + (attempt * 100); // Increase slippage with each attempt
+            
+            // Get quote with direct route preference
+            const quoteData = await this.getJupiterQuoteForConsolidation(
+              info.token,
+              'SOL',
+              tradeAmount,
+              slippageBps,
+              true // Prefer direct routes
+            );
+            
+            if (!quoteData || !quoteData.outAmount) {
+              console.log(`Failed to get quote, retrying with higher slippage...`);
+              continue;
+            }
+            
+            // Execute trade with higher compute unit limit for consolidation
+            const result = await this.executeJupiterSwapWithHighPriority(
+              quoteData,
+              tradeAmount,
+              info.token
+            );
+            
+            if (result && result.success) {
+              console.log(`Successfully consolidated ${info.token} to ${result.outputAmount.toFixed(6)} SOL`);
+              break; // Success, exit retry loop
+            }
+          } catch (error) {
+            console.error(`Error during consolidation attempt ${attempt+1}: ${error.message}`);
+            // Continue to next attempt
+          }
+        }
+      }
+      
+      // 4. Final balance check after all consolidations
+      await this.refreshWalletBalances(true);
+      return true;
+    } catch (error) {
+      console.error('Error during profit consolidation:', error);
+      return false;
+    }
+  }
 /**
  * Enhanced opportunity validation to ensure profit is at least 50% of slippage
  * This implements the 50% profit-to-slippage requirement (increased from 25%)

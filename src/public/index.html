@@ -275,6 +275,11 @@
                         <span id="autoConsolidated" class="font-bold text-gold">0.00000 SOL</span>
                     </div>
                 </div>
+                <div class="mt-4">
+                    <button id="consolidate-profits-btn" class="btn-primary w-full py-2 rounded-lg">
+                        Consolidate Profits
+                    </button>
+                </div>
             </div>
             <!-- Recent Trades -->
             <div class="card">
@@ -338,8 +343,6 @@
 
 
     <script>
-       // Complete Dashboard JavaScript for Swatticus Trading Bot
-
 document.addEventListener('DOMContentLoaded', function() {
     // Token balances
     let walletBalances = {
@@ -396,6 +399,7 @@ document.addEventListener('DOMContentLoaded', function() {
     const walletAddress = document.getElementById('walletAddress');
     const recentTrades = document.getElementById('recentTrades');
     const activeTradesList_el = document.getElementById('activeTradesList');
+    const consolidateProfitsBtn = document.getElementById('consolidate-profits-btn');
 
     // Price elements
     const priceElements = {
@@ -416,6 +420,326 @@ document.addEventListener('DOMContentLoaded', function() {
         'mSOL/SOL': document.getElementById('msol-sol-status'),
         'SOL/mSOL': document.getElementById('sol-msol-status')
     };
+    
+    function handleWebSocketMessage(data) {
+        console.log('Received message:', data);
+        console.log('Message type:', data.type);
+        
+        // Handle different types of messages
+        switch(data.type) {
+            case 'wallet_state':
+            case 'wallet_connected':
+                updateWalletState(data);
+                break;
+                
+            case 'balance_update':
+                updateBalances(data.balances);
+                // Update total SOL equivalent if available
+                if (data.totalSolEquivalent) {
+                    totalSolEquivalent.textContent = `${parseFloat(data.totalSolEquivalent).toFixed(6)} SOL`;
+                }
+                addLogMessage('Wallet balances updated', 'info');
+                break;
+                
+            case 'bot_status':
+                updateBotStatus(data.status);
+                break;
+                
+            case 'price_update':
+                if (data.prices) {
+                    // Update our token prices
+                    tokenPrices = {...tokenPrices, ...data.prices};
+                    updatePriceDisplay();
+                    addLogMessage('Price data updated', 'info');
+                } else if (data.pairPrices) {
+                    // Alternative format handling
+                    tokenPrices = {...tokenPrices, ...data.pairPrices};
+                    updatePriceDisplay();
+                    addLogMessage('Price data updated (alt format)', 'info');
+                } else {
+                    console.log('Price update received but no prices found:', data);
+                    addLogMessage('Received price update with unexpected format', 'warning');
+                }
+                break;
+                
+            case 'trade_started':
+                // Handle case where amount might be a string
+                let tradeAmount = data.amount;
+                if (typeof tradeAmount === 'string') {
+                    tradeAmount = parseFloat(tradeAmount);
+                }
+                
+                addLogMessage(`Starting trade: ${data.pair} for ${tradeAmount.toFixed(6)} ${data.inputToken || 'tokens'}`, 'trade');
+                activeTrades.textContent = parseInt(activeTrades.textContent || 0) + 1;
+                
+                // Add to active trades list
+                addActiveTrade({
+                    txid: data.txid || 'pending',
+                    pair: data.pair,
+                    amount: tradeAmount,
+                    inputToken: data.inputToken || 'Unknown',
+                    startTime: Date.now()
+                });
+                break;
+                
+            case 'trade_completed':
+                handleTradeCompletion(data);
+                break;
+                
+            case 'trade_update':
+            case 'bot_state_update':
+                updateBotState(data);
+                break;
+                
+            case 'profit_update':
+                updateProfitsByToken(data.profits);
+                if (data.totalProfit !== undefined) {
+                    updateTotalRealized(data.totalProfit);
+                }
+                break;
+                
+            case 'profit_consolidation':
+                // Handle profit consolidation messages - format may vary
+                if (data.solGained) {
+                    addLogMessage(`Consolidated ${parseFloat(data.solGained).toFixed(6)} to SOL`, 'profit');
+                    addToAutoConsolidatedTotal(data.solGained);
+                }
+                
+                // Update balances if provided
+                if (data.balances) {
+                    updateBalances(data.balances);
+                }
+                
+                // Display any message
+                if (data.message) {
+                    addLogMessage(data.message, 'profit');
+                }
+                break;
+                
+            case 'consolidation_status':
+                // Handle consolidation status updates
+                if (data.status === 'started') {
+                    addLogMessage('Profit consolidation started...', 'info');
+                } else if (data.status === 'completed') {
+                    addLogMessage('Profit consolidation completed successfully', 'success');
+                    // Enable consolidation button if it was disabled
+                    if (consolidateProfitsBtn) {
+                        consolidateProfitsBtn.disabled = false;
+                        consolidateProfitsBtn.classList.remove('btn-disabled');
+                        consolidateProfitsBtn.innerHTML = 'Consolidate Profits';
+                    }
+                } else if (data.status === 'error') {
+                    addLogMessage(`Consolidation error: ${data.message || 'Unknown error'}`, 'error');
+                    // Enable consolidation button if it was disabled
+                    if (consolidateProfitsBtn) {
+                        consolidateProfitsBtn.disabled = false;
+                        consolidateProfitsBtn.classList.remove('btn-disabled');
+                        consolidateProfitsBtn.innerHTML = 'Consolidate Profits';
+                    }
+                }
+                break;
+                
+            case 'auto_consolidation_update':
+                handleAutoConsolidationUpdate(data);
+                break;
+                
+            case 'auto_consolidation_data':
+                handleAutoConsolidationData(data);
+                break;
+                
+            case 'log_message':
+                addLogMessage(data.message, data.messageType || 'info');
+                break;
+                
+            case 'trades_update':
+                if (data.trades && data.trades.length > 0) {
+                    updateRecentTrades(data.trades);
+                }
+                break;
+                
+            case 'active_trades_update':
+                if (data.activeTrades) {
+                    // If activeTrades is a number, update the counter directly
+                    if (typeof data.activeTrades === 'number') {
+                        activeTrades.textContent = data.activeTrades;
+                    } 
+                    // If it's an array, update the list and counter
+                    else if (Array.isArray(data.activeTrades)) {
+                        // Update active trades display
+                        activeTradesList = data.activeTrades;
+                        updateActiveTradesDisplay();
+                        activeTrades.textContent = data.activeTrades.length;
+                    }
+                }
+                break;
+                
+            case 'health_status':
+                // Silent handler for health checks
+                break;
+                
+            case 'error':
+                addLogMessage(`Error: ${data.error}`, 'error');
+                break;
+                
+            case 'prices_data':
+            case 'price_data':
+                handlePriceData(data);
+                break;
+                
+            default:
+                console.log('Unhandled message:', data);
+                
+                // Try to handle price data in unexpected format
+                if (data.prices || data.pairPrices || data.priceData) {
+                    handlePriceData(data);
+                }
+        }
+    }
+
+    function updateWalletState(walletData) {
+        if (walletData.data && walletData.data.connected) {
+            isWalletConnected = true;
+            const shortAddress = `${walletData.data.publicKey.substring(0, 6)}...${walletData.data.publicKey.substring(walletData.data.publicKey.length - 4)}`;
+            walletAddress.textContent = `Wallet: ${shortAddress}`;
+            
+            // Enable start bot button
+            startBotBtn.disabled = false;
+            startBotBtn.classList.remove('btn-disabled');
+            
+            addLogMessage('Wallet connected', 'success');
+        } else if (walletData.publicKey) {
+            isWalletConnected = true;
+            const shortAddress = `${walletData.publicKey.substring(0, 6)}...${walletData.publicKey.substring(walletData.publicKey.length - 4)}`;
+            walletAddress.textContent = `Wallet: ${shortAddress}`;
+            
+            // Enable start bot button
+            startBotBtn.disabled = false;
+            startBotBtn.classList.remove('btn-disabled');
+            
+            addLogMessage('Wallet connected successfully', 'success');
+        }
+    }
+
+    function updateBotState(data) {
+        // Update balances with latest data
+        if (data.totalBalance !== undefined) {
+            solBalance.textContent = `${parseFloat(data.totalBalance).toFixed(6)} SOL`;
+        }
+        
+        // Update active trades
+        if (data.activeTrades !== undefined) {
+            activeTrades.textContent = data.activeTrades;
+        }
+        
+        // Update recent trades
+        if (data.recentTrades) {
+            updateRecentTrades(data.recentTrades);
+        }
+    }
+
+    function updateBotStatus(status) {
+        isBotRunning = status === 'running';
+        
+        // Update status display
+        botStatus.textContent = isBotRunning ? 'Running' : 'Stopped';
+        botStatus.className = isBotRunning ? 'font-bold text-green-400' : 'font-bold text-red-400';
+        
+        // Update trading pair statuses
+        updatePairStatus(isBotRunning);
+        
+        // Update button states
+        startBotBtn.disabled = isBotRunning;
+        startBotBtn.classList.toggle('btn-disabled', isBotRunning);
+        
+        stopBotBtn.disabled = !isBotRunning;
+        stopBotBtn.classList.toggle('btn-disabled', !isBotRunning);
+        
+        // Add log message
+        if (isBotRunning) {
+            addLogMessage('Bot started successfully', 'success');
+            activityLog.innerHTML = ''; // Clear log when starting
+            addLogMessage('Bot started. Initializing trading systems...', 'info');
+        } else {
+            addLogMessage('Bot stopped', 'warning');
+        }
+    }
+
+    function handleTradeCompletion(data) {
+        if (data.success) {
+            // Ensure profit is a number
+            const profit = parseFloat(data.profit || 0);
+            const profitText = profit.toFixed(6);
+            const tokenType = data.outputToken || data.token || 'SOL';
+            
+            addLogMessage(`Trade completed! Profit: ${profitText} ${tokenType}`, 'success');
+            
+            if (data.txid) {
+                addLogMessage(`Transaction ID: ${data.txid.substring(0, 8)}...`, 'info');
+                
+                // Remove from active trades
+                removeActiveTrade(data.txid);
+            }
+            
+            // Update token-specific profit
+            if (tokenType === 'SOL') {
+                profits.SOL += profit;
+                walletBalances.SOL += profit;
+            } else if (tokenType === 'USDC') {
+                profits.USDC += profit;
+                // Convert USDC profit to SOL and add to SOL profits for total tracking
+                if (tokenPrices['SOL/USDC']) {
+                    const solEquivalent = profit / parseFloat(tokenPrices['SOL/USDC']);
+                    profits.SOL += solEquivalent;
+                }
+                walletBalances.USDC += profit;
+            } else if (tokenType === 'USDT') {
+                profits.USDT += profit;
+                // Convert USDT profit to SOL and add to SOL profits for total tracking
+                if (tokenPrices['SOL/USDT']) {
+                    const solEquivalent = profit / parseFloat(tokenPrices['SOL/USDT']);
+                    profits.SOL += solEquivalent;
+                }
+                walletBalances.USDT += profit;
+            } else if (tokenType === 'mSOL') {
+                profits.mSOL += profit;
+                // Convert mSOL profit to SOL and add to SOL profits for total tracking
+                if (tokenPrices['mSOL/SOL']) {
+                    const solEquivalent = profit * parseFloat(tokenPrices['mSOL/SOL']);
+                    profits.SOL += solEquivalent;
+                }
+                walletBalances.mSOL += profit;
+            }
+            
+            // Update profit display
+            updateTotalRealized();
+            
+            // Update balances display to reflect new amounts
+            updateBalances(walletBalances);
+            
+            // Add to recent trades
+            addTradeToRecent({
+                pair: data.pair || 'Unknown',
+                profit: profit,
+                timestamp: new Date(),
+                txid: data.txid,
+                inputToken: data.inputToken,
+                outputToken: data.outputToken || tokenType
+            });
+            
+            // Update active trades count
+            activeTrades.textContent = Math.max(0, parseInt(activeTrades.textContent || 0) - 1);
+        } else {
+            addLogMessage(`Trade failed: ${data.error || 'Unknown error'}`, 'error');
+            
+            // Remove from active trades
+            if (data.txid) {
+                removeActiveTrade(data.txid);
+            }
+            
+            // Update active trades count
+            activeTrades.textContent = Math.max(0, parseInt(activeTrades.textContent || 0) - 1);
+        }
+    }
 
     // Function to add an active trade
     function addActiveTrade(trade) {
@@ -457,7 +781,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     <div class="text-xs text-[var(--text-secondary)]">Started: ${startTime}</div>
                 </div>
                 <span class="font-bold text-[var(--accent-gold)]">
-                    ${trade.amount.toFixed(6)} ${trade.inputToken}
+                    ${parseFloat(trade.amount).toFixed(6)} ${trade.inputToken}
                 </span>
             `;
             
@@ -530,17 +854,26 @@ document.addEventListener('DOMContentLoaded', function() {
 
     // Update UI with balance information
     function updateBalances(balances) {
-        solBalance.textContent = `${(balances.SOL || 0).toFixed(4)} SOL`;
+        if (!balances) return;
+
+        // Make sure all values are numbers and not strings
+        Object.keys(balances).forEach(key => {
+            if (typeof balances[key] === 'string') {
+                balances[key] = parseFloat(balances[key]);
+            }
+        });
+
+        solBalance.textContent = `${(balances.SOL || 0).toFixed(6)} SOL`;
         usdcBalance.textContent = `${(balances.USDC || 0).toFixed(2)} USDC`;
         usdtBalance.textContent = `${(balances.USDT || 0).toFixed(2)} USDT`;
-        msolBalance.textContent = `${(balances.mSOL || 0).toFixed(2)} mSOL`;
+        msolBalance.textContent = `${(balances.mSOL || 0).toFixed(4)} mSOL`;
         
         // Update wallet balances for profit calculations
         walletBalances = balances;
         
         // Calculate and update total SOL equivalent
         const totalSol = calculateTotalSolEquivalent(balances);
-        totalSolEquivalent.textContent = `${totalSol.toFixed(4)} SOL`;
+        totalSolEquivalent.textContent = `${totalSol.toFixed(6)} SOL`;
     }
 
     // Initialize auto-consolidation tracking
@@ -596,10 +929,38 @@ document.addEventListener('DOMContentLoaded', function() {
         }
         
         // Log the consolidation action
-        addLogMessage(`🔄 Auto-consolidated ${consolidatedAmount.toFixed(6)} ${fromToken} to SOL`, 'profit');
+        addLogMessage(`🔄 Auto-consolidated ${parseFloat(consolidatedAmount).toFixed(6)} ${fromToken} to SOL`, 'profit');
         
         // Update total realized profit to include consolidated amount
         updateTotalRealized();
+    }
+
+    // Handle manual consolidation request
+    function handleManualConsolidation() {
+        if (socket && socket.readyState === WebSocket.OPEN) {
+            // Disable button to prevent multiple clicks
+            consolidateProfitsBtn.disabled = true;
+            consolidateProfitsBtn.classList.add('btn-disabled');
+            
+            // Add spinner to button
+            consolidateProfitsBtn.innerHTML = `<span class="spinner"></span> Consolidating...`;
+            
+            // Send consolidation request
+            socket.send(JSON.stringify({
+                type: 'consolidate_profit'
+            }));
+            
+            addLogMessage('Manually triggered profit consolidation...', 'info');
+            
+            // Re-enable button after timeout
+            setTimeout(() => {
+                consolidateProfitsBtn.disabled = false;
+                consolidateProfitsBtn.classList.remove('btn-disabled');
+                consolidateProfitsBtn.innerHTML = 'Consolidate Profits';
+            }, 10000); // 10 second timeout
+        } else {
+            addLogMessage('Cannot consolidate profits: Server connection lost', 'error');
+        }
     }
 
     // Function to update the auto-consolidated display
@@ -644,7 +1005,7 @@ document.addEventListener('DOMContentLoaded', function() {
     function updateTotalRealized(explicitValue = null) {
         // If an explicit value is provided, use it
         if (explicitValue !== null) {
-            totalRealized.textContent = `${explicitValue.toFixed(6)} SOL`;
+            totalRealized.textContent = `${parseFloat(explicitValue).toFixed(6)} SOL`;
             return;
         }
     
@@ -691,9 +1052,9 @@ document.addEventListener('DOMContentLoaded', function() {
             if (tokenPrices[pair]) {
                 // Format based on pair type
                 if (pair.includes('/SOL')) {
-                    element.textContent = tokenPrices[pair].toFixed(6);
+                    element.textContent = parseFloat(tokenPrices[pair]).toFixed(6);
                 } else {
-                    element.textContent = tokenPrices[pair].toFixed(2);
+                    element.textContent = parseFloat(tokenPrices[pair]).toFixed(2);
                 }
                 element.classList.remove('animate-pulse');
             }
@@ -704,10 +1065,10 @@ document.addEventListener('DOMContentLoaded', function() {
     function updateProfitsByToken(profitData) {
         if (profitData) {
             // Update our profit tracking
-            if (profitData.SOL !== undefined) profits.SOL = profitData.SOL;
-            if (profitData.USDC !== undefined) profits.USDC = profitData.USDC;
-            if (profitData.USDT !== undefined) profits.USDT = profitData.USDT;
-            if (profitData.mSOL !== undefined) profits.mSOL = profitData.mSOL;
+            if (profitData.SOL !== undefined) profits.SOL = parseFloat(profitData.SOL);
+            if (profitData.USDC !== undefined) profits.USDC = parseFloat(profitData.USDC);
+            if (profitData.USDT !== undefined) profits.USDT = parseFloat(profitData.USDT);
+            if (profitData.mSOL !== undefined) profits.mSOL = parseFloat(profitData.mSOL);
             
             // Update display
             updateTotalRealized();
@@ -752,7 +1113,7 @@ document.addEventListener('DOMContentLoaded', function() {
                         <div class="text-xs text-[var(--text-secondary)]">${timeString}</div>
                     </div>
                     <span class="font-bold ${isPositive ? 'text-green-400' : 'text-red-400'}">
-                        ${isPositive ? '+' : ''}${trade.profit.toFixed(6)} SOL
+                        ${isPositive ? '+' : ''}${parseFloat(trade.profit).toFixed(6)} SOL
                     </span>
                 `;
                 
@@ -766,6 +1127,7 @@ document.addEventListener('DOMContentLoaded', function() {
             tradesContainer.innerHTML = '<p class="text-[var(--text-secondary)] text-center">No recent trades</p>';
         }
     }
+
 
     // Add a new trade to recent trades
     function addTradeToRecent(trade) {
@@ -791,7 +1153,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 <div class="text-xs text-[var(--text-secondary)]">${timeString}</div>
             </div>
             <span class="font-bold ${isPositive ? 'text-green-400' : 'text-red-400'}">
-                ${isPositive ? '+' : ''}${trade.profit.toFixed(6)} SOL
+                ${isPositive ? '+' : ''}${parseFloat(trade.profit).toFixed(6)} SOL
             </span>
         `;
         
@@ -809,253 +1171,47 @@ document.addEventListener('DOMContentLoaded', function() {
         
         // Update profits tracking
         if (trade.outputToken === 'SOL') {
-            profits.SOL += trade.profit;
+            profits.SOL += parseFloat(trade.profit);
         }
         
         // Update profit display
         updateTotalRealized();
     }
 
-    // WebSocket message handler
-    function handleWebSocketMessage(data) {
-        console.log('Received message:', data.type);
+    // Function to handle price data in different formats
+    function handlePriceData(data) {
+        let priceData = null;
         
-        // Handle different types of messages
-        switch(data.type) {
-            case 'wallet_state':
-            case 'wallet_connected':
-                updateWalletState(data);
-                break;
-                
-            case 'balance_update':
-                updateBalances(data.balances);
-                // Update total SOL equivalent if available
-                if (data.totalSolEquivalent) {
-                    totalSolEquivalent.textContent = `${data.totalSolEquivalent.toFixed(4)} SOL`;
-                }
-                addLogMessage('Wallet balances updated', 'info');
-                break;
-                
-            case 'bot_status':
-                updateBotStatus(data.status);
-                break;
-                
-            case 'price_update':
-                if (data.prices) {
-                    // Update our token prices
-                    tokenPrices = {...tokenPrices, ...data.prices};
-                    updatePriceDisplay();
-                }
-                break;
-                
-            case 'trade_started':
-                addLogMessage(`Starting trade: ${data.pair} for ${data.amount.toFixed(6)} tokens`, 'trade');
-                activeTrades.textContent = parseInt(activeTrades.textContent) + 1;
-                
-                // Add to active trades list
-                addActiveTrade({
-                    txid: data.txid || 'pending',
-                    pair: data.pair,
-                    amount: data.amount,
-                    inputToken: data.inputToken,
-                    startTime: Date.now()
-                });
-                break;
-                
-            case 'trade_completed':
-                handleTradeCompletion(data);
-                break;
-                
-            case 'trade_update':
-            case 'bot_state_update':
-                updateBotState(data);
-                break;
-                
-            case 'profit_update':
-                updateProfitsByToken(data.profits);
-                if (data.totalProfit !== undefined) {
-                    updateTotalRealized(data.totalProfit);
-                }
-                break;
-                
-            case 'auto_consolidation_update':
-                handleAutoConsolidationUpdate(data);
-                break;
-                
-            case 'auto_consolidation_data':
-                handleAutoConsolidationData(data);
-                break;
-                
-            case 'log_message':
-                addLogMessage(data.message, data.messageType || 'info');
-                break;
-                
-            case 'trades_update':
-                if (data.trades && data.trades.length > 0) {
-                    updateRecentTrades(data.trades);
-                }
-                break;
-                
-            case 'active_trades_update':
-                if (data.activeTrades) {
-                    updateActiveTrades(data.activeTrades);
-                    activeTrades.textContent = data.activeTrades.length;
-                }
-                break;
-                
-            case 'health_status':
-                // Silent handler for health checks
-                break;
-                
-            case 'error':
-                addLogMessage(`Error: ${data.error}`, 'error');
-                break;
-                
-            default:
-                console.log('Unhandled message:', data);
+        // Try different possible formats
+        if (data.prices) {
+            priceData = data.prices;
+        } else if (data.pairPrices) {
+            priceData = data.pairPrices;
+        } else if (data.priceData) {
+            priceData = data.priceData;
+        } else if (data.data && data.data.prices) {
+            priceData = data.data.prices;
+        } else if (data.price) {
+            // Single price entry
+            priceData = { [data.pair]: data.price };
         }
-    }
-
-    function updateWalletState(walletData) {
-        if (walletData.data && walletData.data.connected) {
-            isWalletConnected = true;
-            const shortAddress = `${walletData.data.publicKey.substring(0, 6)}...${walletData.data.publicKey.substring(walletData.data.publicKey.length - 4)}`;
-            walletAddress.textContent = `Wallet: ${shortAddress}`;
+        
+        if (priceData) {
+            // Update token prices
+            for (const [pair, price] of Object.entries(priceData)) {
+                // Handle case where price might be an object with price property
+                if (typeof price === 'object' && price !== null && price.price !== undefined) {
+                    tokenPrices[pair] = parseFloat(price.price);
+                } else {
+                    tokenPrices[pair] = parseFloat(price);
+                }
+            }
             
-            // Enable start bot button
-            startBotBtn.disabled = false;
-            startBotBtn.classList.remove('btn-disabled');
-            
-            addLogMessage('Wallet connected', 'success');
-        } else if (walletData.publicKey) {
-            isWalletConnected = true;
-            const shortAddress = `${walletData.publicKey.substring(0, 6)}...${walletData.publicKey.substring(walletData.publicKey.length - 4)}`;
-            walletAddress.textContent = `Wallet: ${shortAddress}`;
-            
-            // Enable start bot button
-            startBotBtn.disabled = false;
-            startBotBtn.classList.remove('btn-disabled');
-            
-            addLogMessage('Wallet connected successfully', 'success');
-        }
-    }
-
-    function updateBotState(data) {
-        // Update balances with latest data
-        if (data.totalBalance !== undefined) {
-            solBalance.textContent = `${data.totalBalance.toFixed(4)} SOL`;
-        }
-        
-        // Update active trades
-        if (data.activeTrades !== undefined) {
-            activeTrades.textContent = data.activeTrades;
-        }
-        
-        // Update recent trades
-        if (data.recentTrades) {
-            updateRecentTrades(data.recentTrades);
-        }
-    }
-
-    function updateBotStatus(status) {
-        isBotRunning = status === 'running';
-        
-        // Update status display
-        botStatus.textContent = isBotRunning ? 'Running' : 'Stopped';
-        botStatus.className = isBotRunning ? 'font-bold text-green-400' : 'font-bold text-red-400';
-        
-        // Update trading pair statuses
-        updatePairStatus(isBotRunning);
-        
-        // Update button states
-        startBotBtn.disabled = isBotRunning;
-        startBotBtn.classList.toggle('btn-disabled', isBotRunning);
-        
-        stopBotBtn.disabled = !isBotRunning;
-        stopBotBtn.classList.toggle('btn-disabled', !isBotRunning);
-        
-        // Add log message
-        if (isBotRunning) {
-            addLogMessage('Bot started successfully', 'success');
-            activityLog.innerHTML = ''; // Clear log when starting
-            addLogMessage('Bot started. Initializing trading systems...', 'info');
+            updatePriceDisplay();
+            addLogMessage('Price data updated successfully', 'success');
         } else {
-            addLogMessage('Bot stopped', 'warning');
-        }
-    }
-
-    function handleTradeCompletion(data) {
-        if (data.success) {
-            const profitText = data.profit ? data.profit.toFixed(6) : '0.000000';
-            const tokenType = data.token || 'SOL';
-            
-            addLogMessage(`Trade completed! Profit: ${profitText} ${tokenType}`, 'success');
-            
-            if (data.txid) {
-                addLogMessage(`Transaction ID: ${data.txid.substring(0, 8)}...`, 'info');
-                
-                // Remove from active trades
-                removeActiveTrade(data.txid);
-            }
-            
-            // Update token-specific profit
-            if (tokenType === 'SOL') {
-                profits.SOL += data.profit || 0;
-                walletBalances.SOL += data.profit || 0;
-            } else if (tokenType === 'USDC') {
-                profits.USDC += data.profit || 0;
-                // Convert USDC profit to SOL and add to SOL profits for total tracking
-                if (tokenPrices['SOL/USDC']) {
-                    const solEquivalent = (data.profit || 0) / tokenPrices['SOL/USDC'];
-                    profits.SOL += solEquivalent;
-                }
-                walletBalances.USDC += data.profit || 0;
-            } else if (tokenType === 'USDT') {
-                profits.USDT += data.profit || 0;
-                // Convert USDT profit to SOL and add to SOL profits for total tracking
-                if (tokenPrices['SOL/USDT']) {
-                    const solEquivalent = (data.profit || 0) / tokenPrices['SOL/USDT'];
-                    profits.SOL += solEquivalent;
-                }
-                walletBalances.USDT += data.profit || 0;
-            } else if (tokenType === 'mSOL') {
-                profits.mSOL += data.profit || 0;
-                // Convert mSOL profit to SOL and add to SOL profits for total tracking
-                if (tokenPrices['mSOL/SOL']) {
-                    const solEquivalent = (data.profit || 0) * tokenPrices['mSOL/SOL'];
-                    profits.SOL += solEquivalent;
-                }
-                walletBalances.mSOL += data.profit || 0;
-            }
-            
-            // Update profit display
-            updateTotalRealized();
-            
-            // Update balances display to reflect new amounts
-            updateBalances(walletBalances);
-            
-            // Add to recent trades
-            addTradeToRecent({
-                pair: data.pair || 'Unknown',
-                profit: data.profit || 0,
-                timestamp: new Date(),
-                txid: data.txid,
-                inputToken: data.inputToken,
-                outputToken: data.outputToken
-            });
-            
-            // Update active trades count
-            activeTrades.textContent = Math.max(0, parseInt(activeTrades.textContent) - 1);
-        } else {
-            addLogMessage(`Trade failed: ${data.error || 'Unknown error'}`, 'error');
-            
-            // Remove from active trades
-            if (data.txid) {
-                removeActiveTrade(data.txid);
-            }
-            
-            // Update active trades count
-            activeTrades.textContent = Math.max(0, parseInt(activeTrades.textContent) - 1);
+            console.log('Unable to find price data in message:', data);
+            addLogMessage('Price data format not recognized', 'warning');
         }
     }
 
@@ -1079,12 +1235,28 @@ document.addEventListener('DOMContentLoaded', function() {
             // Initialize auto-consolidation tracking
             initializeAutoConsolidation();
             
+            // Request initial price data
+            socket.send(JSON.stringify({ type: 'get_prices' }));
+            addLogMessage('Requesting price data...', 'info');
+            
             // Send health check every 30 seconds
             setInterval(() => {
                 if (socket && socket.readyState === WebSocket.OPEN) {
                     socket.send(JSON.stringify({ type: 'health_check' }));
                 }
             }, 30000);
+            
+            // Request price updates every 10 seconds if not receiving them
+            let priceCheckInterval = setInterval(() => {
+                const lastPriceElement = priceElements['SOL/USDC'];
+                if (lastPriceElement && lastPriceElement.textContent === 'Loading...') {
+                    console.log('Price data not received, requesting update...');
+                    socket.send(JSON.stringify({ type: 'get_prices' }));
+                } else {
+                    // Price data received, stop checking
+                    clearInterval(priceCheckInterval);
+                }
+            }, 10000);
         };
 
         socket.onmessage = (event) => {
@@ -1173,6 +1345,11 @@ document.addEventListener('DOMContentLoaded', function() {
         addLogMessage('Activity log cleared', 'info');
     });
 
+    // Consolidate profits button
+    consolidateProfitsBtn.addEventListener('click', () => {
+        handleManualConsolidation();
+    });
+
     // Initialize the WebSocket connection
     initWebSocket();
     
@@ -1183,7 +1360,25 @@ document.addEventListener('DOMContentLoaded', function() {
 // Global error handler
 window.onerror = function(message, source, lineno, colno, error) {
     console.error('Global error:', message, 'at', source, 'line', lineno);
+    const activityLog = document.getElementById('activityLog');
     if (activityLog) {
+        const addLogMessage = function(message, type = 'info') {
+            const now = new Date();
+            const timestamp = now.toLocaleTimeString();
+            const logItem = document.createElement('div');
+            logItem.className = 'log-entry';
+            
+            // Set color based on message type
+            let colorClass = 'text-[var(--text-secondary)]'; 
+            if (type === 'error') {
+                colorClass = 'text-red-400';
+            }
+            
+            logItem.innerHTML = `<span class="text-xs opacity-70">[${timestamp}]</span> <span class="${colorClass}">${message}</span>`;
+            activityLog.appendChild(logItem);
+            activityLog.scrollTop = activityLog.scrollHeight;
+        };
+        
         addLogMessage(`JavaScript error: ${message}`, 'error');
     }
     return false;
@@ -1192,7 +1387,25 @@ window.onerror = function(message, source, lineno, colno, error) {
 // Unhandled promise rejection handler
 window.addEventListener('unhandledrejection', function(event) {
     console.error('Unhandled promise rejection:', event.reason);
+    const activityLog = document.getElementById('activityLog');
     if (activityLog) {
+        const addLogMessage = function(message, type = 'info') {
+            const now = new Date();
+            const timestamp = now.toLocaleTimeString();
+            const logItem = document.createElement('div');
+            logItem.className = 'log-entry';
+            
+            // Set color based on message type
+            let colorClass = 'text-[var(--text-secondary)]'; 
+            if (type === 'error') {
+                colorClass = 'text-red-400';
+            }
+            
+            logItem.innerHTML = `<span class="text-xs opacity-70">[${timestamp}]</span> <span class="${colorClass}">${message}</span>`;
+            activityLog.appendChild(logItem);
+            activityLog.scrollTop = activityLog.scrollHeight;
+        };
+        
         addLogMessage(`Unhandled promise rejection: ${event.reason}`, 'error');
     }
 });
@@ -1203,18 +1416,21 @@ document.addEventListener('visibilitychange', function() {
         console.log('Page hidden - consider suspending WebSocket');
     } else {
         console.log('Page visible - ensure WebSocket is connected');
+        const socket = window.socket;
         if (socket && socket.readyState !== WebSocket.OPEN) {
-            initWebSocket();
+            window.initWebSocket && window.initWebSocket();
         }
     }
 });
 
 // Add page unload handler for cleanup
 window.addEventListener('beforeunload', function() {
+    const socket = window.socket;
     if (socket && socket.readyState === WebSocket.OPEN) {
         socket.close();
     }
-});
-    </script>
+});   
+                    
+</script>
 </body>
 </html>
