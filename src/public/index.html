@@ -158,6 +158,60 @@
         .border-gold {
             border-color: var(--accent-gold);
         }
+        
+        /* USD Value Badge */
+        .usd-value {
+            font-size: 0.75rem;
+            background-color: rgba(212, 175, 55, 0.2);
+            padding: 0.1rem 0.4rem;
+            border-radius: 0.25rem;
+            margin-left: 0.5rem;
+            color: var(--accent-light-gold);
+        }
+        
+        /* Token List Styling */
+        .token-list {
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        
+        .token-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0.5rem 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        
+        .token-item:last-child {
+            border-bottom: none;
+        }
+        
+        /* Enhanced Log Display */
+        #activityLog {
+            max-height: 500px;
+            overflow-y: auto;
+            font-size: 0.875rem;
+        }
+        
+        /* New Token List Section */
+        .token-list-section {
+            transition: all 0.3s ease;
+            height: auto;
+            overflow: hidden;
+        }
+        
+        /* Total portfolio value */
+        .portfolio-value {
+            font-size: 1.5rem;
+            font-weight: bold;
+            text-align: center;
+            margin: 1rem 0;
+            padding: 0.5rem;
+            background: linear-gradient(to right, rgba(212, 175, 55, 0.1), rgba(241, 196, 15, 0.1));
+            border-radius: 0.5rem;
+            border: 1px solid rgba(212, 175, 55, 0.3);
+        }
     </style>
 </head>
 <body class="bg-[var(--bg-dark)] text-[var(--text-primary)] p-4 md:p-8">
@@ -189,38 +243,34 @@
                 </div>
             </div>
 
-            <!-- Wallet Summary -->
+            <!-- Wallet Summary with USD Value -->
             <div class="card">
                 <h2 class="text-xl md:text-2xl font-semibold mb-4 text-[var(--accent-gold)]">Wallet Summary</h2>
+                <div class="portfolio-value">
+                    Total Portfolio: <span id="totalPortfolioUSD" class="text-light-gold">$0.00</span>
+                </div>
                 <div class="space-y-3">
                     <div class="flex justify-between">
                         <span class="text-[var(--text-secondary)]">Bot Status</span>
                         <span id="botStatus" class="font-bold text-yellow-400">Inactive</span>
                     </div>
                     <div class="flex justify-between">
-                        <span class="text-[var(--text-secondary)]">SOL Balance</span>
-                        <span id="solBalance" class="font-bold text-gold">0.00 SOL</span>
-                    </div>
-                    <div class="flex justify-between">
                         <span class="text-[var(--text-secondary)]">USDC Balance</span>
                         <span id="usdcBalance" class="font-bold text-gold">0.00 USDC</span>
-                    </div>
-                    <div class="flex justify-between">
-                        <span class="text-[var(--text-secondary)]">USDT Balance</span>
-                        <span id="usdtBalance" class="font-bold text-gold">0.00 USDT</span>
-                    </div>
-                    <div class="flex justify-between">
-                        <span class="text-[var(--text-secondary)]">mSOL Balance</span>
-                        <span id="msolBalance" class="font-bold text-gold">0.00 mSOL</span>
                     </div>
                     <div class="flex justify-between mt-2 pt-2 border-t border-gray-700">
                         <span class="text-[var(--text-secondary)]">Total SOL Equivalent</span>
                         <span id="totalSolEquivalent" class="font-bold text-light-gold">0.00 SOL</span>
                     </div>
                 </div>
+                <div class="mt-4">
+                    <button id="viewTokens" class="btn-primary w-full py-2 rounded-lg">
+                        View All Tokens
+                    </button>
+                </div>
             </div>
 
-            <!-- Trading Pairs -->
+            <!-- Trading Pairs Status -->
             <div class="card">
                 <h2 class="text-xl md:text-2xl font-semibold mb-4 text-[var(--accent-gold)]">Trading Pairs</h2>
                 <div id="tradingPairs" class="space-y-2">
@@ -248,7 +298,26 @@
                         <span class="text-[var(--text-secondary)]">SOL/mSOL</span>
                         <span id="sol-msol-status" class="text-yellow-400 font-bold text-sm">Inactive</span>
                     </div>
+                    <div class="flex justify-between items-center">
+                        <span class="text-[var(--text-secondary)]">BONK/USDC</span>
+                        <span id="bonk-usdc-status" class="text-yellow-400 font-bold text-sm">Inactive</span>
+                    </div>
+                    <div class="flex justify-between items-center">
+                        <span class="text-[var(--text-secondary)]">JTO/USDC</span>
+                        <span id="jto-usdc-status" class="text-yellow-400 font-bold text-sm">Inactive</span>
+                    </div>
                 </div>
+            </div>
+        </div>
+
+        <!-- Token List Section (Hidden by Default) -->
+        <div id="tokenListSection" class="mt-4 md:mt-6 card hidden token-list-section">
+            <div class="flex justify-between items-center mb-4">
+                <h2 class="text-xl md:text-2xl font-semibold text-[var(--accent-gold)]">All Tokens</h2>
+                <button id="hideTokens" class="text-sm text-[var(--text-secondary)] hover:text-gold">Close</button>
+            </div>
+            <div id="tokenList" class="token-list">
+                <p class="text-[var(--text-secondary)] text-center">Loading tokens...</p>
             </div>
         </div>
 
@@ -261,6 +330,10 @@
                     <div class="flex justify-between text-sm">
                         <span class="text-[var(--text-secondary)]">Total Realized</span>
                         <span id="totalRealized" class="font-bold text-light-gold">0.00 SOL</span>
+                    </div>
+                    <div class="flex justify-between text-sm">
+                        <span class="text-[var(--text-secondary)]">USD Value</span>
+                        <span id="totalRealizedUSD" class="font-bold text-light-gold">$0.00</span>
                     </div>
                     <div class="flex justify-between border-t border-gray-700 pt-2 mt-2">
                         <span class="text-[var(--text-secondary)]">Active Trades</span>
@@ -301,7 +374,7 @@
         <!-- Price Data -->
         <div class="mt-4 md:mt-6 card">
             <h2 class="text-xl md:text-2xl font-semibold mb-4 text-[var(--accent-gold)]">Live Price Data</h2>
-            <div id="priceData" class="grid grid-cols-2 gap-4 md:grid-cols-3">
+            <div id="priceData" class="grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-4">
                 <div class="flex justify-between">
                     <span class="text-[var(--text-secondary)]">SOL/USDC</span>
                     <span id="sol-usdc-price" class="font-bold text-gold animate-pulse">Loading...</span>
@@ -326,16 +399,24 @@
                     <span class="text-[var(--text-secondary)]">SOL/mSOL</span>
                     <span id="sol-msol-price" class="font-bold text-gold animate-pulse">Loading...</span>
                 </div>
+                <div class="flex justify-between">
+                    <span class="text-[var(--text-secondary)]">BONK/USDC</span>
+                    <span id="bonk-usdc-price" class="font-bold text-gold animate-pulse">Loading...</span>
+                </div>
+                <div class="flex justify-between">
+                    <span class="text-[var(--text-secondary)]">JTO/USDC</span>
+                    <span id="jto-usdc-price" class="font-bold text-gold animate-pulse">Loading...</span>
+                </div>
             </div>
         </div>
         
-        <!-- Opportunity Log -->
+        <!-- Bot Log Activity - Expanded Log -->
         <div class="mt-4 md:mt-6 card">
             <div class="flex justify-between items-center mb-4">
                 <h2 class="text-xl md:text-2xl font-semibold text-[var(--accent-gold)]">Bot Activity Log</h2>
                 <button id="clearLog" class="text-sm text-[var(--text-secondary)] hover:text-gold">Clear</button>
             </div>
-            <div id="activityLog" class="space-y-2 h-80 overflow-y-auto bg-[var(--bg-dark)] p-4 rounded-lg border border-gold border-opacity-20">
+            <div id="activityLog" class="space-y-2 h-96 overflow-y-auto bg-[var(--bg-dark)] p-4 rounded-lg border border-gold border-opacity-20">
                 <p class="text-[var(--text-secondary)]">Bot is inactive. Start the bot to see activity.</p>
             </div>
         </div>
@@ -349,8 +430,17 @@ document.addEventListener('DOMContentLoaded', function() {
         SOL: 0.0,
         USDC: 0.0,
         USDT: 0.0,
-        mSOL: 0.0
+        mSOL: 0.0,
+        BONK: 0.0,
+        JTO: 0.0,
+        SAMO: 0.0,
+        ORCA: 0.0,
+        BTC: 0.0,
+        ETH: 0.0
     };
+
+    // All tokens with USD values
+    let tokenHoldings = {};
 
     // Token prices for conversions
     let tokenPrices = {
@@ -359,7 +449,11 @@ document.addEventListener('DOMContentLoaded', function() {
         'USDC/SOL': 0,
         'USDT/SOL': 0,
         'mSOL/SOL': 0,
-        'SOL/mSOL': 0
+        'SOL/mSOL': 0,
+        'BONK/USDC': 0,
+        'JTO/USDC': 0,
+        'BTC/USDC': 0,
+        'ETH/USDC': 0
     };
 
     // WebSocket connection
@@ -374,7 +468,16 @@ document.addEventListener('DOMContentLoaded', function() {
         USDC: 0,
         USDT: 0,
         mSOL: 0,
-        consolidated: 0 // Track consolidated profit separately
+        consolidated: 0,
+        usd: 0 // Track USD profit
+    };
+
+    // Bot configuration
+    let botConfig = {
+        tradeInterval: 60000, // 1 minute trading interval
+        minProfitPerTrade: 0.05, // 0.05 SOL minimum profit per trade
+        slippageBps: 150, // 1.5% slippage tolerance
+        maxConcurrentTrades: 5
     };
 
     // Active trades information
@@ -383,12 +486,11 @@ document.addEventListener('DOMContentLoaded', function() {
     // UI elements
     const activityLog = document.getElementById('activityLog');
     const botStatus = document.getElementById('botStatus');
-    const solBalance = document.getElementById('solBalance');
     const usdcBalance = document.getElementById('usdcBalance');
-    const usdtBalance = document.getElementById('usdtBalance');
-    const msolBalance = document.getElementById('msolBalance');
     const totalSolEquivalent = document.getElementById('totalSolEquivalent');
     const totalRealized = document.getElementById('totalRealized');
+    const totalRealizedUSD = document.getElementById('totalRealizedUSD');
+    const totalPortfolioUSD = document.getElementById('totalPortfolioUSD');
     const autoConsolidatedEl = document.getElementById('autoConsolidated');
     const activeTrades = document.getElementById('activeTrades');
     const completedTrades = document.getElementById('completedTrades');
@@ -400,6 +502,10 @@ document.addEventListener('DOMContentLoaded', function() {
     const recentTrades = document.getElementById('recentTrades');
     const activeTradesList_el = document.getElementById('activeTradesList');
     const consolidateProfitsBtn = document.getElementById('consolidate-profits-btn');
+    const viewTokensBtn = document.getElementById('viewTokens');
+    const hideTokensBtn = document.getElementById('hideTokens');
+    const tokenListSection = document.getElementById('tokenListSection');
+    const tokenList = document.getElementById('tokenList');
 
     // Price elements
     const priceElements = {
@@ -408,7 +514,9 @@ document.addEventListener('DOMContentLoaded', function() {
         'USDC/SOL': document.getElementById('usdc-sol-price'),
         'USDT/SOL': document.getElementById('usdt-sol-price'),
         'mSOL/SOL': document.getElementById('msol-sol-price'),
-        'SOL/mSOL': document.getElementById('sol-msol-price')
+        'SOL/mSOL': document.getElementById('sol-msol-price'),
+        'BONK/USDC': document.getElementById('bonk-usdc-price'),
+        'JTO/USDC': document.getElementById('jto-usdc-price')
     };
 
     // Status elements
@@ -418,8 +526,70 @@ document.addEventListener('DOMContentLoaded', function() {
         'USDC/SOL': document.getElementById('usdc-sol-status'),
         'USDT/SOL': document.getElementById('usdt-sol-status'),
         'mSOL/SOL': document.getElementById('msol-sol-status'),
-        'SOL/mSOL': document.getElementById('sol-msol-status')
+        'SOL/mSOL': document.getElementById('sol-msol-status'),
+        'BONK/USDC': document.getElementById('bonk-usdc-status'),
+        'JTO/USDC': document.getElementById('jto-usdc-status')
     };
+    
+    // Show token list
+    viewTokensBtn.addEventListener('click', function() {
+        tokenListSection.classList.remove('hidden');
+        updateTokenList();
+    });
+    
+    // Hide token list
+    hideTokensBtn.addEventListener('click', function() {
+        tokenListSection.classList.add('hidden');
+    });
+    
+    // Update token list with USD values
+    function updateTokenList() {
+        // Clear existing list
+        tokenList.innerHTML = '';
+        
+        // Get all tokens and sort by USD value
+        const tokensArray = Object.entries(tokenHoldings).sort((a, b) => b[1].usdValue - a[1].usdValue);
+        
+        // Exit if no tokens
+        if (tokensArray.length === 0) {
+            tokenList.innerHTML = '<p class="text-[var(--text-secondary)] text-center">No tokens found</p>';
+            return;
+        }
+        
+        // Add each token to the list
+        tokensArray.forEach(([token, data]) => {
+            const tokenItem = document.createElement('div');
+            tokenItem.className = 'token-item';
+            
+            // Format USD value
+            const usdValue = data.usdValue.toLocaleString('en-US', {
+                style: 'currency',
+                currency: 'USD',
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2
+            });
+            
+            // Format token balance based on token type
+            let formattedBalance = data.balance.toFixed(6);
+            if (token === 'USDC' || token === 'USDT') {
+                formattedBalance = data.balance.toFixed(2);
+            } else if (token === 'BONK' || token === 'SAMO') {
+                formattedBalance = data.balance.toLocaleString();
+            }
+            
+            tokenItem.innerHTML = `
+                <div>
+                    <span class="font-medium">${token}</span>
+                </div>
+                <div>
+                    <span class="font-bold text-gold">${formattedBalance}</span>
+                    <span class="usd-value">${usdValue}</span>
+                </div>
+            `;
+            
+            tokenList.appendChild(tokenItem);
+        });
+    }
     
     function handleWebSocketMessage(data) {
         console.log('Received message:', data);
@@ -437,6 +607,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 // Update total SOL equivalent if available
                 if (data.totalSolEquivalent) {
                     totalSolEquivalent.textContent = `${parseFloat(data.totalSolEquivalent).toFixed(6)} SOL`;
+                    updateUSDEquivalent(data.totalSolEquivalent);
                 }
                 addLogMessage('Wallet balances updated', 'info');
                 break;
@@ -450,11 +621,13 @@ document.addEventListener('DOMContentLoaded', function() {
                     // Update our token prices
                     tokenPrices = {...tokenPrices, ...data.prices};
                     updatePriceDisplay();
+                    updateTokenUSDValues(); // Update USD values after price update
                     addLogMessage('Price data updated', 'info');
                 } else if (data.pairPrices) {
                     // Alternative format handling
                     tokenPrices = {...tokenPrices, ...data.pairPrices};
                     updatePriceDisplay();
+                    updateTokenUSDValues(); // Update USD values after price update
                     addLogMessage('Price data updated (alt format)', 'info');
                 } else {
                     console.log('Price update received but no prices found:', data);
@@ -586,6 +759,15 @@ document.addEventListener('DOMContentLoaded', function() {
                 handlePriceData(data);
                 break;
                 
+            case 'token_holdings':
+                // Handle token holdings with USD values
+                if (data.holdings) {
+                    tokenHoldings = data.holdings;
+                    updateTokenUSDValues(); // Update values with current prices
+                    updateTokenList(); // Update the token list display
+                }
+                break;
+                
             default:
                 console.log('Unhandled message:', data);
                 
@@ -623,7 +805,7 @@ document.addEventListener('DOMContentLoaded', function() {
     function updateBotState(data) {
         // Update balances with latest data
         if (data.totalBalance !== undefined) {
-            solBalance.textContent = `${parseFloat(data.totalBalance).toFixed(6)} SOL`;
+            updateUSDEquivalent(data.totalBalance);
         }
         
         // Update active trades
@@ -659,8 +841,29 @@ document.addEventListener('DOMContentLoaded', function() {
             addLogMessage('Bot started successfully', 'success');
             activityLog.innerHTML = ''; // Clear log when starting
             addLogMessage('Bot started. Initializing trading systems...', 'info');
+            
+            // Send custom bot config to improve profitability
+            sendBotConfig();
         } else {
             addLogMessage('Bot stopped', 'warning');
+        }
+    }
+    
+    // Send optimized bot configuration to server
+    function sendBotConfig() {
+        if (socket && socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({
+                type: 'update_config',
+                config: {
+                    tradeInterval: botConfig.tradeInterval,
+                    minProfitPerTrade: botConfig.minProfitPerTrade,
+                    maxSlippage: botConfig.slippageBps,
+                    maxConcurrentTrades: botConfig.maxConcurrentTrades,
+                    aggressiveMode: true,
+                    minTradeSize: 0.01
+                }
+            }));
+            addLogMessage('Sent optimized bot configuration: 1-minute interval, 0.05 SOL min profit', 'info');
         }
     }
 
@@ -775,6 +978,18 @@ document.addEventListener('DOMContentLoaded', function() {
             // Format start time
             const startTime = new Date(trade.startTime).toLocaleTimeString();
             
+            // Calculate trade value in USD
+            let usdValue = 0;
+            if (trade.inputToken === 'USDC' || trade.inputToken === 'USDT') {
+                usdValue = trade.amount;
+            } else if (trade.inputToken === 'SOL' && tokenPrices['SOL/USDC']) {
+                usdValue = trade.amount * tokenPrices['SOL/USDC'];
+            }
+            
+            // Format USD value
+            const usdValueStr = usdValue > 0 ? 
+                `<span class="usd-value">$${usdValue.toFixed(2)}</span>` : '';
+            
             tradeEl.innerHTML = `
                 <div>
                     <div class="font-medium">${trade.pair}</div>
@@ -782,6 +997,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 </div>
                 <span class="font-bold text-[var(--accent-gold)]">
                     ${parseFloat(trade.amount).toFixed(6)} ${trade.inputToken}
+                    ${usdValueStr}
                 </span>
             `;
             
@@ -819,8 +1035,8 @@ document.addEventListener('DOMContentLoaded', function() {
         activityLog.appendChild(logItem);
         activityLog.scrollTop = activityLog.scrollHeight;
         
-        // Limit log entries (keep last 100)
-        while (activityLog.children.length > 100) {
+        // Limit log entries (keep last 200)
+        while (activityLog.children.length > 200) {
             activityLog.removeChild(activityLog.firstChild);
         }
         
@@ -849,7 +1065,75 @@ document.addEventListener('DOMContentLoaded', function() {
             total += balances.mSOL * tokenPrices['mSOL/SOL'];
         }
         
+        // Convert BONK to SOL (via USDC)
+        if (balances.BONK && tokenPrices['BONK/USDC'] && tokenPrices['USDC/SOL']) {
+            const bonkToUSDC = balances.BONK * tokenPrices['BONK/USDC'];
+            total += bonkToUSDC * tokenPrices['USDC/SOL'];
+        }
+        
+        // Convert JTO to SOL (via USDC)
+        if (balances.JTO && tokenPrices['JTO/USDC'] && tokenPrices['USDC/SOL']) {
+            const jtoToUSDC = balances.JTO * tokenPrices['JTO/USDC'];
+            total += jtoToUSDC * tokenPrices['USDC/SOL'];
+        }
+        
         return total;
+    }
+    
+    // Update token USD values
+    function updateTokenUSDValues() {
+        // Calculate USD value for each token
+        Object.keys(walletBalances).forEach(token => {
+            if (!tokenHoldings[token]) {
+                tokenHoldings[token] = {
+                    balance: walletBalances[token],
+                    usdValue: 0
+                };
+            } else {
+                tokenHoldings[token].balance = walletBalances[token];
+            }
+            
+            // Update USD value
+            let usdValue = 0;
+            if (token === 'USDC' || token === 'USDT') {
+                usdValue = walletBalances[token];
+            } else if (token === 'SOL' && tokenPrices['SOL/USDC']) {
+                usdValue = walletBalances[token] * tokenPrices['SOL/USDC'];
+            } else if (token === 'mSOL' && tokenPrices['mSOL/SOL'] && tokenPrices['SOL/USDC']) {
+                usdValue = walletBalances[token] * tokenPrices['mSOL/SOL'] * tokenPrices['SOL/USDC'];
+            } else if (token === 'BONK' && tokenPrices['BONK/USDC']) {
+                usdValue = walletBalances[token] * tokenPrices['BONK/USDC'];
+            } else if (token === 'JTO' && tokenPrices['JTO/USDC']) {
+                usdValue = walletBalances[token] * tokenPrices['JTO/USDC'];
+            } else if (token === 'BTC' && tokenPrices['BTC/USDC']) {
+                usdValue = walletBalances[token] * tokenPrices['BTC/USDC'];
+            } else if (token === 'ETH' && tokenPrices['ETH/USDC']) {
+                usdValue = walletBalances[token] * tokenPrices['ETH/USDC'];
+            }
+            
+            tokenHoldings[token].usdValue = usdValue;
+        });
+        
+        // Update total portfolio value
+        updateTotalPortfolioValue();
+    }
+    
+    // Update total portfolio USD value
+    function updateTotalPortfolioValue() {
+        let totalUSD = 0;
+        
+        // Sum all token USD values
+        Object.values(tokenHoldings).forEach(data => {
+            totalUSD += data.usdValue;
+        });
+        
+        // Format and display
+        totalPortfolioUSD.textContent = totalUSD.toLocaleString('en-US', {
+            style: 'currency',
+            currency: 'USD',
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2
+        });
     }
 
     // Update UI with balance information
@@ -863,17 +1147,43 @@ document.addEventListener('DOMContentLoaded', function() {
             }
         });
 
-        solBalance.textContent = `${(balances.SOL || 0).toFixed(6)} SOL`;
-        usdcBalance.textContent = `${(balances.USDC || 0).toFixed(2)} USDC`;
-        usdtBalance.textContent = `${(balances.USDT || 0).toFixed(2)} USDT`;
-        msolBalance.textContent = `${(balances.mSOL || 0).toFixed(4)} mSOL`;
+        // Update only USDC balance display
+        if (balances.USDC) {
+            usdcBalance.textContent = `${balances.USDC.toFixed(2)} USDC`;
+        }
         
         // Update wallet balances for profit calculations
-        walletBalances = balances;
+        for (const token in balances) {
+            if (walletBalances.hasOwnProperty(token)) {
+                walletBalances[token] = balances[token];
+            }
+        }
         
         // Calculate and update total SOL equivalent
         const totalSol = calculateTotalSolEquivalent(balances);
         totalSolEquivalent.textContent = `${totalSol.toFixed(6)} SOL`;
+        
+        // Update USD equivalent
+        updateUSDEquivalent(totalSol);
+        
+        // Update token USD values
+        updateTokenUSDValues();
+    }
+    
+    // Update USD equivalent of SOL value
+    function updateUSDEquivalent(solAmount) {
+        if (tokenPrices['SOL/USDC']) {
+            const usdValue = parseFloat(solAmount) * tokenPrices['SOL/USDC'];
+            
+            // Update total realized profit in USD
+            profits.usd = profits.SOL * tokenPrices['SOL/USDC'];
+            totalRealizedUSD.textContent = profits.usd.toLocaleString('en-US', {
+                style: 'currency',
+                currency: 'USD',
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2
+            });
+        }
     }
 
     // Initialize auto-consolidation tracking
@@ -1005,7 +1315,19 @@ document.addEventListener('DOMContentLoaded', function() {
     function updateTotalRealized(explicitValue = null) {
         // If an explicit value is provided, use it
         if (explicitValue !== null) {
+            profits.SOL = parseFloat(explicitValue);
             totalRealized.textContent = `${parseFloat(explicitValue).toFixed(6)} SOL`;
+            
+            // Update USD value
+            if (tokenPrices['SOL/USDC']) {
+                profits.usd = profits.SOL * tokenPrices['SOL/USDC'];
+                totalRealizedUSD.textContent = profits.usd.toLocaleString('en-US', {
+                    style: 'currency',
+                    currency: 'USD',
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 2
+                });
+            }
             return;
         }
     
@@ -1020,6 +1342,17 @@ document.addEventListener('DOMContentLoaded', function() {
         
         // Update the total realized display
         totalRealized.textContent = `${totalAmount.toFixed(6)} SOL`;
+        
+        // Update USD value
+        if (tokenPrices['SOL/USDC']) {
+            profits.usd = totalAmount * tokenPrices['SOL/USDC'];
+            totalRealizedUSD.textContent = profits.usd.toLocaleString('en-US', {
+                style: 'currency',
+                currency: 'USD',
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2
+            });
+        }
     }
 
     // Handle auto-consolidation data response
@@ -1053,6 +1386,9 @@ document.addEventListener('DOMContentLoaded', function() {
                 // Format based on pair type
                 if (pair.includes('/SOL')) {
                     element.textContent = parseFloat(tokenPrices[pair]).toFixed(6);
+                } else if (pair === 'BONK/USDC') {
+                    // Format smaller values appropriately
+                    element.textContent = parseFloat(tokenPrices[pair]).toFixed(8);
                 } else {
                     element.textContent = parseFloat(tokenPrices[pair]).toFixed(2);
                 }
@@ -1079,7 +1415,8 @@ document.addEventListener('DOMContentLoaded', function() {
     function updatePairStatus(active = false) {
         for (const [pair, element] of Object.entries(pairStatusElements)) {
             element.textContent = active ? 'Active' : 'Inactive';
-            element.className = active ? 'text-green-400 font-bold text-sm' : 'text-yellow-400 font-bold text-sm';
+            element.className =
+            active ? 'text-green-400 font-bold text-sm' : 'text-yellow-400 font-bold text-sm';
         }
     }
 
@@ -1107,14 +1444,26 @@ document.addEventListener('DOMContentLoaded', function() {
                 // Get token for profit
                 const outputToken = trade.outputToken || 'SOL';
                 
+                // Calculate USD value if SOL and price is available
+                let usdValue = '';
+                if (outputToken === 'SOL' && tokenPrices['SOL/USDC']) {
+                    const usdAmount = parseFloat(trade.profit) * tokenPrices['SOL/USDC'];
+                    usdValue = `<span class="usd-value">$${usdAmount.toFixed(2)}</span>`;
+                } else if (outputToken === 'USDC') {
+                    usdValue = `<span class="usd-value">$${parseFloat(trade.profit).toFixed(2)}</span>`;
+                }
+                
                 tradeEl.innerHTML = `
                     <div>
                         <div class="font-medium">${trade.pair || trade.inputToken + '/' + outputToken}</div>
                         <div class="text-xs text-[var(--text-secondary)]">${timeString}</div>
                     </div>
-                    <span class="font-bold ${isPositive ? 'text-green-400' : 'text-red-400'}">
-                        ${isPositive ? '+' : ''}${parseFloat(trade.profit).toFixed(6)} SOL
-                    </span>
+                    <div>
+                        <span class="font-bold ${isPositive ? 'text-green-400' : 'text-red-400'}">
+                            ${isPositive ? '+' : ''}${parseFloat(trade.profit).toFixed(6)} ${outputToken}
+                        </span>
+                        ${usdValue}
+                    </div>
                 `;
                 
                 tradesContainer.appendChild(tradeEl);
@@ -1147,14 +1496,26 @@ document.addEventListener('DOMContentLoaded', function() {
         // Format timestamp
         const timeString = new Date().toLocaleTimeString();
         
+        // Calculate USD value if SOL and price is available
+        let usdValue = '';
+        if (trade.outputToken === 'SOL' && tokenPrices['SOL/USDC']) {
+            const usdAmount = parseFloat(trade.profit) * tokenPrices['SOL/USDC'];
+            usdValue = `<span class="usd-value">$${usdAmount.toFixed(2)}</span>`;
+        } else if (trade.outputToken === 'USDC') {
+            usdValue = `<span class="usd-value">$${parseFloat(trade.profit).toFixed(2)}</span>`;
+        }
+        
         tradeEl.innerHTML = `
             <div>
                 <div class="font-medium">${trade.pair}</div>
                 <div class="text-xs text-[var(--text-secondary)]">${timeString}</div>
             </div>
-            <span class="font-bold ${isPositive ? 'text-green-400' : 'text-red-400'}">
-                ${isPositive ? '+' : ''}${parseFloat(trade.profit).toFixed(6)} SOL
-            </span>
+            <div>
+                <span class="font-bold ${isPositive ? 'text-green-400' : 'text-red-400'}">
+                    ${isPositive ? '+' : ''}${parseFloat(trade.profit).toFixed(6)} ${trade.outputToken}
+                </span>
+                ${usdValue}
+            </div>
         `;
         
         // Add to container
@@ -1208,6 +1569,7 @@ document.addEventListener('DOMContentLoaded', function() {
             }
             
             updatePriceDisplay();
+            updateTokenUSDValues(); // Update USD values after price update
             addLogMessage('Price data updated successfully', 'success');
         } else {
             console.log('Unable to find price data in message:', data);
@@ -1430,7 +1792,6 @@ window.addEventListener('beforeunload', function() {
         socket.close();
     }
 });   
-                    
 </script>
 </body>
 </html>

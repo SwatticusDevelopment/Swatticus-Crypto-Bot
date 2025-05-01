@@ -10,6 +10,7 @@ const https = require('https');
 const PriceFetcher = require('./priceFetcher');
 const Decimal = require('decimal.js');
 const EnhancedTradingStrategy = require('./enhancedStrategy');
+const { TOKENS, TOKEN_DECIMALS, TRADING_PAIRS } = require('./token-configs');
 
 // Load environment variables
 dotenv.config({ path: path.join(__dirname, '..', '.env') });
@@ -35,54 +36,161 @@ function createAgents() {
 }
 
 const { httpAgent, httpsAgent } = createAgents();
-
-    class SolanaTradingBot {
+class SolanaTradingBot {
     constructor() {
         console.log(chalk.blue('Initializing Solana Trading Bot with active trading enabled...'));
+        
+        // Trading strategy parameters
+        this.minMovementThreshold = parseFloat(process.env.MIN_MOVEMENT_THRESHOLD) || 0.03; // Lower threshold to detect more opportunities
+        this.minProfitPerTrade = parseFloat(process.env.MIN_PROFIT_PER_TRADE) || 0.05; // Target 0.05 SOL profit per trade
         
         // Enhanced Configuration with defaults
         this.config = {
             rpcEndpoint: process.env.RPC_ENDPOINT,
-            minProfitPercentage: parseFloat(process.env.MIN_PROFIT_PERCENTAGE), // Lower threshold
-            maxSlippage: parseInt(process.env.MAX_SLIPPAGE_BPS), // More tolerant of slippage
-            refreshInterval: parseInt(process.env.REFRESH_INTERVAL), // Faster refresh
+            minProfitPercentage: parseFloat(process.env.MIN_PROFIT_PERCENTAGE) || 0.1, // Higher profit threshold
+            maxSlippage: parseInt(process.env.MAX_SLIPPAGE_BPS) || 150, // Reasonable slippage tolerance
+            refreshInterval: parseInt(process.env.REFRESH_INTERVAL) || 60000, // 1-minute refresh (60 seconds)
             initialBalance: parseFloat(process.env.INITIAL_BALANCE),
-            dailyProfitTarget: parseFloat(process.env.DAILY_PROFIT_TARGET),
-            minTradeSize: parseFloat(process.env.MIN_TRADE_SIZE),
-            maxConcurrentTrades: parseInt(process.env.MAX_CONCURRENT_TRADES),
-            aggressiveMode: false, // Always use aggressive mode for active trading
-            routingMode: process.env.ROUTING_MODE,
-            maxPriceDifferencePercent: parseFloat(process.env.MAX_PRICE_DIFFERENCE_PERCENT),
-            consolidationInterval: parseInt(process.env.CONSOLIDATION_INTERVAL) || 60, // Minutes between auto-consolidations (default 60)
+            dailyProfitTarget: parseFloat(process.env.DAILY_PROFIT_TARGET) || 1.0, // Target 1 SOL daily profit
+            minTradeSize: parseFloat(process.env.MIN_TRADE_SIZE) || 0.01, // Minimum 0.01 SOL/token per trade
+            maxConcurrentTrades: parseInt(process.env.MAX_CONCURRENT_TRADES) || 5, // Allow up to 5 concurrent trades
+            aggressiveMode: process.env.AGGRESSIVE_MODE !== 'false', // Enable aggressive mode by default
+            routingMode: process.env.ROUTING_MODE || 'aggressive', // Use aggressive routing for better prices
+            maxPriceDifferencePercent: parseFloat(process.env.MAX_PRICE_DIFFERENCE_PERCENT) || 5, // Allow up to 5% price difference
+            consolidationInterval: parseInt(process.env.CONSOLIDATION_INTERVAL) || 15, // Minutes between auto-consolidations (default 15)
             minAmountToConsolidate: parseFloat(process.env.MIN_AMOUNT_TO_CONSOLIDATE) || 0.01, // Minimum token amount to consolidate
-            autoConsolidation: process.env.AUTO_CONSOLIDATION !== 'false', // Enable/disable auto-consolidation
-            consolidationThreshold: parseFloat(process.env.CONSOLIDATION_THRESHOLD) || 0.005, // Min SOL profit before consolidating        
-            ignorePriceDifference: process.env.IGNORE_PRICE_DIFFERENCE === 'false'
+            autoConsolidation: process.env.AUTO_CONSOLIDATION !== 'false', // Enable auto-consolidation by default
+            consolidationThreshold: parseFloat(process.env.CONSOLIDATION_THRESHOLD) || 0.01, // Min SOL profit before consolidating        
+            ignorePriceDifference: process.env.IGNORE_PRICE_DIFFERENCE === 'true' // Don't ignore price differences by default
         };
 
-        // Token Configurations
+        // Comprehensive Token Configurations
         this.TOKEN_ADDRESSES = {
-            'SOL': 'So11111111111111111111111111111111111111112',
+            // Major tokens
+            'SOL': 'So11111111111111111111111111111111111111112', // Wrapped SOL
             'USDC': 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
             'USDT': 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB',
-            'mSOL': 'mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So'
+            'BTC': '9n4nbM75f5Ui33ZbPYXn59EwSgE8CGsHtAeTH5YFeJ9E', // Wrapped BTC
+            'ETH': '2FPyTwcZLUg1MDrwsyoP4D6s1tM7hAkHYRjkNb5w6Pxk', // Wrapped ETH
+            
+            // Solana ecosystem tokens
+            'RAY': '4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R', // Raydium
+            'SRM': 'SRMuApVNdxXokk5GT7XD5cUUgXMBCoAz2LHeuAoKWRt', // Serum
+            'mSOL': 'mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So', // Marinade Staked SOL
+            'BONK': 'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263', // Bonk
+            'JTO': 'jtojtomepa8beP8AuQc6eXt5FriJwfFMwQx2v2f9XCE', // Jito
+            'JLP': 'JPLPXipaDXdZJkGxYjYbj9mh1n5JnQvXBFkLx5aDKMPz', // Jito Liquid Staking
+            'SAMO': '7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU', // Samoyedcoin
+            'ORCA': 'orcaEKTdK7LKz57vaAYr9QeNsVEPfiu6QeMU1kektZE', // Orca
+            'ATLAS': 'ATLASXmbPQxBUYbxPsV97usA3fPQYEqzQBUHgiFCUsXx', // Star Atlas
+            'POLIS': 'poLisWXnNRwC6oBu1vHiuKQzFjGL4XDSu4g9qjz9qVk', // Star Atlas DAO
+            
+            // More Solana tokens
+            'MEAN': 'MEANeD3XDdUmNMsRGjASkSWdC8prLYsoRJ61pPeHctD', // Mean DAO
+            'DUST': 'DUSTawucrTsGU8hcqRdHDCbuYhCPADMLM2VcCb8VnFnQ', // DUST Protocol
+            'SHDW': 'SHDWyBxihqiCj6YekG2GUr7wqKLeLAMK1gHZck9pL6y', // GenesysGo Shadow
+            'BERN': 'BERNKmPBXUfPYqEFRxFMSzPt4gECBhTDRJqWJSHpKKQW', // Bern
+            'PORT': 'PoRTjZMPXb9T7dyU7tpLEZRQj7e6ssfAE62j2oQuc6y', // Port Finance
+            'MNGO': 'MangoCzJ36AjZyKwVj3VnYU4GTonjfVEnJmvvWaxLac', // Mango Markets
+            'GENE': 'GENEtH5amGSi8kHAtQoezp1XEXwZJ8vcuePYnXdKrMYz', // Genopets
+            'SNY': '4dmKkXNHdgYsXqBHCuMikNQWwVomZURhYvkkX5c4pQ7y', // Synthetify
+            'AUDIO': '9LMQSbpRX8eh3eHzxu5jfCvkJwLnRgiLV5oQVMynqqhH', // Audius
+            'HADES': 'BWXrrYFHxTvjmCgPcJZZuPNV3eFx7XMRHDcX4ttCWRqM', // Hades by Helium
+            'RENDER': 'rndrizKT3MK1iimdxRdWabcF7Zg7AR5T6rcqyPZhGn2', // Render Network
+            'PYTH': '4CkQJBxhU8EZ2UjhigbtdaPbpTe6mqf811fipYBFbSYN', // Pyth Network
+            'SC': 'ScMggE5wYs85XzTrZBVRyxy1dh3xcCJjjpz6f5RCzVi', // Serum Surfers
+            'LVL': 'LVLogicpG95HyKy1WCPbC3rB1QWVBs3WZ9JERTgcnBaJ', // LVL Finance
+            'BLUR': 'BLURVbWGofP27AxVwgELBzEMJGGRtXgzYG1XGkSoRHdz', // Blur Finance
+            'STEP': 'StepAscQoEioFxxWGnh2sLBDFp9d8rvKz2Yp39iDpyT', // Step Finance
+            'GST': 'AFbX8oGjGpmVFywbVouvhQSRmiW2aR1mohfahi4Y2AdB', // STEPN GST
+            'GMT': '7i5KKsX2weiTkry7jA4ZwSuXGhs5eJBEjY8vVxR4pfRx' // STEPN GMT
         };
 
+        // Token decimal places for proper conversion
         this.TOKEN_DECIMALS = {
+            // Main tokens
             'SOL': 9,
             'USDC': 6,
             'USDT': 6,
-            'mSOL': 9
+            'BTC': 8,
+            'ETH': 8,
+            'mSOL': 9,
+            
+            // Popular ecosystem tokens
+            'RAY': 6,
+            'SRM': 6,
+            'BONK': 5,
+            'JTO': 9,
+            'JLP': 9,
+            'SAMO': 9,
+            'ORCA': 6,
+            'ATLAS': 8,
+            'POLIS': 8,
+            
+            // Additional tokens
+            'MEAN': 6,
+            'DUST': 9,
+            'SHDW': 6,
+            'BERN': 9,
+            'PORT': 6,
+            'MNGO': 6,
+            'GENE': 9,
+            'SNY': 6,
+            'AUDIO': 8,
+            'HADES': 9,
+            'RENDER': 8,
+            'PYTH': 6,
+            'SC': 9,
+            'LVL': 6,
+            'BLUR': 8,
+            'STEP': 9,
+            'GST': 9,
+            'GMT': 9
         };
 
-        // Enhanced Trading Configuration
+        // Optimized trading pairs for maximum opportunity detection
         this.tradingPairs = [
+            // Core pairs (highest liquidity)
             'SOL/USDC', 
             'SOL/USDT', 
             'USDC/SOL', 
             'USDT/SOL',
             'mSOL/SOL',
-            'SOL/mSOL'
+            'SOL/mSOL',
+            
+            // High-volume token pairs
+            'BTC/USDC',
+            'ETH/USDC',
+            'RAY/USDC',
+            'BONK/USDC',
+            'JTO/USDC',
+            'SAMO/USDC',
+            'ORCA/USDC',
+            
+            // Token/SOL pairs for additional opportunities
+            'BTC/SOL',
+            'ETH/SOL',
+            'BONK/SOL',
+            'JTO/SOL',
+            
+            // Additional pairs based on market opportunities
+            'RAY/SOL',
+            'SAMO/SOL',
+            'ATLAS/USDC',
+            'POLIS/USDC'
+        ];
+
+        // High-value trading pairs (prioritized in strategy)
+        this.highValuePairs = [
+            'SOL/USDC', 
+            'SOL/USDT', 
+            'USDC/SOL', 
+            'USDT/SOL',
+            'BTC/USDC',
+            'ETH/USDC',
+            'BONK/USDC',
+            'JTO/USDC',
+            'mSOL/SOL'
         ];
 
         // Enhanced Bot State
@@ -100,10 +208,18 @@ const { httpAgent, httpsAgent } = createAgents();
             status: 'initialized',
             connectionRetries: 0,
             maxRetries: 5,
-            tradingEnabled: true // Explicitly enable trading
+            tradingEnabled: true, // Explicitly enable trading
+            autoConsolidatedProfit: 0,
+            realizedProfit: 0,
+            tokenProfits: {
+                SOL: 0,
+                USDC: 0,
+                USDT: 0,
+                mSOL: 0
+            }
         };
 
-        // Price Fetcher with enhanced functionality
+        // Price Fetcher with enhanced functionality for all tokens
         this.priceFetcher = new PriceFetcher(this.TOKEN_ADDRESSES);
 
         // Initialize enhanced trading strategy
