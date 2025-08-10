@@ -1,38 +1,25 @@
 {
-    "name": "solana-slippage-bot",
-    "version": "1.0.0",
-    "description": "Advanced Solana trading bot that monitors price differentials and executes trades when profitable opportunities arise",
-    "main": "src/server.js",
-    "scripts": {
-        "start": "node src/server.js",
-        "dev": "nodemon src/server.js"
-    },
-    "keywords": [
-        "solana",
-        "crypto",
-        "trading",
-        "bot",
-        "arbitrage",
-        "slippage",
-        "jupiter"
-    ],
-    "author": "",
-    "license": "MIT",
-    "dependencies": {
-        "@solana/spl-token": "^0.3.11",
-        "@solana/spl-token-registry": "^0.2.4574",
-        "@solana/web3.js": "^1.98.0",
-        "bs58": "^6.0.0",
-        "chalk": "^4.1.2",
-        "cli-table3": "^0.6.5",
-        "colors": "^1.4.0",
-        "decimal.js": "^10.5.0",
-        "dotenv": "^16.5.0",
-        "express": "^5.1.0",
-        "node-fetch": "^2.6.7",
-        "ws": "^8.18.1"
-    },
-    "devDependencies": {
-        "nodemon": "^3.0.1"
-    }
+  "name": "swatticus-slippage-bot",
+  "version": "1.0.0",
+  "description": "Multichain crypto slippage bot with dynamic token discovery, EVM + Solana support, and rate-limited scanning.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js"
+  },
+  "keywords": [
+    "evm"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "ethers": "^6.11.1",
+    "node-fetch": "^2.6.12",
+    "ws": "^8.16.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
+  },
+  "type": "commonjs"
 }
