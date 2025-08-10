@@ -1,14 +1,19 @@
 {
   "name": "swatticus-slippage-bot",
   "version": "1.0.0",
-  "description": "Multichain crypto slippage bot with dynamic token discovery, EVM + Solana support, and rate-limited scanning.",
+  "description": "Multichain slippage/arbitrage bot with EVM support, optional Solana, rate limits, router fan-out, and daily rollover.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
     "dev": "nodemon index.js"
   },
   "keywords": [
-    "evm"
+    "crypto",
+    "slippage",
+    "bot",
+    "multichain",
+    "evm",
+    "solana"
   ],
   "author": "",
   "license": "MIT",

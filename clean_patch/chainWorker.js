@@ -1,5 +1,5 @@
-// chainWorker.js
-const { ethers } = require('ethers');
+// chainWorker.js (ethers v6 compatible)
+const ethers = require('ethers');
 const { fanoutQuotes } = require('./evmRouters');
 const { execute } = require('./evmSwap');
 
@@ -21,10 +21,10 @@ async function attemptOnce(chainId, pair, amountWei) {
 }
 
 function startChainWorker(rpcUrl, chainId, pairs, baseAmountWei) {
-  const provider = new ethers.providers.JsonRpcProvider(rpcUrl, chainId);
+  const provider = new ethers.JsonRpcProvider(rpcUrl, chainId);
   const intMs = intervalFromRps(process.env[`${(process.env.EVM_CHAIN||'base').toUpperCase()}_RPC_RPS`]);
   const timer = setInterval(async () => {
-    const pair = pairs[Math.floor(Math.random()*pairs.length)];
+    const pair = pairs[Math.floor(Math.random() * pairs.length)];
     try { await attemptOnce(chainId, pair, baseAmountWei); } catch {}
   }, intMs);
   return () => clearInterval(timer);

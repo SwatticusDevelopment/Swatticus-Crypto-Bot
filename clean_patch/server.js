@@ -24,7 +24,7 @@ BigInt.prototype.toJSON = function() { return this.toString() };
 // Import Trading Bot Core - handle both direct and relative imports
 let SolanaTradingBot;
 try {
-  SolanaTradingBot = require('./index');
+  SolanaTradingBot = require('../index');
 } catch (err) {
   try {
     SolanaTradingBot = require(path.join(__dirname, 'index'));
