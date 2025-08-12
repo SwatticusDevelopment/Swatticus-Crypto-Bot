@@ -1,4 +1,4 @@
-// src/js/v3Spot.js - UPDATED with better error handling and provider usage
+// src/js/v3Spot.js - FIXED factory.call error
 const { ethers } = require('ethers');
 const { getProvider } = require('./robustProvider');
 
@@ -44,16 +44,12 @@ async function getPoolAddr(tokenA, tokenB, fee) {
     const provider = getProvider();
     const factory = new ethers.Contract(UNI_V3_FACTORY, FACTORY_ABI, provider);
     
-    const pool = await factory.call({
-      to: UNI_V3_FACTORY,
-      data: factory.interface.encodeFunctionData('getPool', [
-        ethers.getAddress(tokenA),
-        ethers.getAddress(tokenB), 
-        fee
-      ])
-    });
-    
-    const [poolAddress] = factory.interface.decodeFunctionResult('getPool', pool);
+    // FIXED: Use proper contract call instead of factory.call
+    const poolAddress = await factory.getPool(
+      ethers.getAddress(tokenA),
+      ethers.getAddress(tokenB), 
+      fee
+    );
     
     if (!poolAddress || poolAddress === ethers.ZeroAddress) {
       poolCache.set(cacheKey, null);
@@ -65,6 +61,7 @@ async function getPoolAddr(tokenA, tokenB, fee) {
     
   } catch (error) {
     console.log(`[v3spot] Factory call failed for ${tokenA}/${tokenB} fee ${fee}: ${error.message}`);
+    poolCache.set(cacheKey, null);
     return null;
   }
 }
@@ -118,36 +115,20 @@ async function spotAmountOut(tokenIn, tokenOut, fee, amountInRaw) {
     
     const provider = getProvider();
     
-    // Get pool data
-    const [slot0Result, token0Result, token1Result] = await Promise.all([
-      provider.call({
-        to: poolAddr,
-        data: '0x3850c7bd' // slot0() selector
-      }),
-      provider.call({
-        to: poolAddr,
-        data: '0x0dfe1681' // token0() selector  
-      }),
-      provider.call({
-        to: poolAddr,
-        data: '0xd21220a7' // token1() selector
-      })
+    // Get pool data using proper contract calls
+    const pool = new ethers.Contract(poolAddr, POOL_ABI, provider);
+    
+    const [slot0Result, token0, token1] = await Promise.all([
+      pool.slot0(),
+      pool.token0(),
+      pool.token1()
     ]);
     
-    if (!slot0Result || slot0Result === '0x' || !token0Result || !token1Result) {
-      throw new Error('Failed to read pool data');
+    if (!slot0Result || !slot0Result[0]) {
+      throw new Error('Failed to read pool slot0');
     }
     
-    // Decode results
-    const slot0Data = ethers.AbiCoder.defaultAbiCoder().decode(
-      ['uint160', 'int24', 'uint16', 'uint16', 'uint16', 'uint8', 'bool'],
-      slot0Result
-    );
-    
-    const token0 = ethers.getAddress('0x' + token0Result.slice(26));
-    const token1 = ethers.getAddress('0x' + token1Result.slice(26));
-    
-    const sqrtPriceX96 = BigInt(slot0Data[0].toString());
+    const sqrtPriceX96 = BigInt(slot0Result[0].toString());
     
     if (sqrtPriceX96 === 0n) {
       throw new Error('Pool not initialized');
@@ -162,11 +143,13 @@ async function spotAmountOut(tokenIn, tokenOut, fee, amountInRaw) {
     // Determine direction
     const tokenInAddr = ethers.getAddress(tokenIn);
     const tokenOutAddr = ethers.getAddress(tokenOut);
+    const token0Addr = ethers.getAddress(token0);
+    const token1Addr = ethers.getAddress(token1);
     
-    const isToken0In = tokenInAddr.toLowerCase() === token0.toLowerCase();
-    const isToken1Out = tokenOutAddr.toLowerCase() === token1.toLowerCase();
+    const isToken0In = tokenInAddr.toLowerCase() === token0Addr.toLowerCase();
+    const isToken1Out = tokenOutAddr.toLowerCase() === token1Addr.toLowerCase();
     
-    if (!(isToken0In && isToken1Out) && !(tokenInAddr.toLowerCase() === token1.toLowerCase() && tokenOutAddr.toLowerCase() === token0.toLowerCase())) {
+    if (!(isToken0In && isToken1Out) && !(tokenInAddr.toLowerCase() === token1Addr.toLowerCase() && tokenOutAddr.toLowerCase() === token0Addr.toLowerCase())) {
       throw new Error('Token addresses do not match pool');
     }
     

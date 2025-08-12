@@ -1,14 +1,19 @@
 {
   "name": "swatticus-technology-slippage-system",
-  "version": "1.3.2",
-  "description": "Swatticus Technology Slippage System \u2014 Any-pair on Base/Ethereum via Uniswap v3/v2 (RPC only).",
+  "version": "2.0.0",
+  "description": "Swatticus Technology Slippage System — Enhanced with robust execution and approval handling",
   "main": "index.js",
   "type": "commonjs",
   "scripts": {
     "start": "node index.js",
     "dev": "nodemon index.js",
     "debug:quote": "node tools/debug-quote.js",
-     "pairs": "node scripts/generatePairs.js"
+    "pairs": "node scripts/generatePairs.js",
+    "approve": "node emergency-approve-all.js",
+    "rebalance": "node scripts/rebalance-now.js",
+    "diagnose": "node diagnose.js",
+    "test:baseswap": "node tools/test-baseswap-complete.js",
+    "wallet:check": "node tools/wallet-diagnosis.js"
   },
   "dependencies": {
     "dotenv": "^16.4.5",
@@ -17,5 +22,25 @@
   },
   "devDependencies": {
     "nodemon": "^3.1.0"
-  }
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "private"
+  },
+  "keywords": [
+    "arbitrage",
+    "defi",
+    "ethereum",
+    "base",
+    "uniswap",
+    "baseswap",
+    "trading",
+    "bot"
+  ],
+  "author": "Swatticus Technology",
+  "license": "UNLICENSED",
+  "private": true
 }

@@ -1,4 +1,4 @@
-// src/js/chainWorker.js - Updated worker with robust error handling
+// src/js/chainWorker.js - UPDATED with better error handling and execution flow
 const { ethers } = require('ethers');
 const cfg = require('./multichainConfig');
 const { getBestQuote } = require('./robustQuoter');
@@ -13,8 +13,8 @@ const path = require('path');
 
 /** -------------------- helpers -------------------- */
 function intervalFromRps(val) {
-  const r = parseFloat(val || '0.5');
-  return Math.max(2000, Math.floor(1000 / Math.max(r, 0.1))); // Much more conservative
+  const r = parseFloat(val || '1');
+  return Math.max(1000, Math.floor(1000 / Math.max(r, 0.1))); // Minimum 1 second
 }
 
 function toAddrLower(v) {
@@ -76,9 +76,11 @@ function loadPairs() {
   return pairs;
 }
 
-/** -------------------- core attempt -------------------- */
+/** -------------------- enhanced attempt with better execution flow -------------------- */
 async function attemptOnce(chain, chainId, pairLabel, baseUsd, fromAddress) {
   let provider;
+  const startTime = Date.now();
+  
   try {
     const { sell, buy } = parsePairLabel(pairLabel);
 
@@ -90,16 +92,55 @@ async function attemptOnce(chain, chainId, pairLabel, baseUsd, fromAddress) {
     provider = getProvider();
 
     // Size trade: get N wei of sellToken worth `baseUsd`
-    const sellAmount = await amountForUsdToken(provider, sellToken, baseUsd);
+    console.log(`[attempt] Sizing trade: ${baseUsd} worth of ${sell}...`);
+    let sellAmount;
+    try {
+      sellAmount = await amountForUsdToken(provider, sellToken, baseUsd);
+      console.log(`[attempt] Trade size: ${sellAmount.toString()} wei of ${sell}`);
+    } catch (sizingError) {
+      log.warn('sizing_error', { 
+        pair: pairLabel, 
+        msg: `Cannot size trade: ${sizingError.message}` 
+      });
+      return;
+    }
+
+    // Check wallet balance before getting quotes
+    const ERC20_ABI = ['function balanceOf(address) view returns (uint256)'];
+    try {
+      const tokenContract = new ethers.Contract(sellToken, ERC20_ABI, provider);
+      const balance = await tokenContract.balanceOf(fromAddress);
+      
+      if (balance < sellAmount) {
+        log.info('insufficient_balance', { 
+          pair: pairLabel, 
+          required: sellAmount.toString(),
+          available: balance.toString(),
+          msg: 'Insufficient balance for trade'
+        });
+        return;
+      }
+      console.log(`[attempt] ✅ Sufficient balance: ${balance.toString()} >= ${sellAmount.toString()}`);
+    } catch (balanceError) {
+      log.warn('balance_check_failed', { 
+        pair: pairLabel, 
+        msg: `Balance check failed: ${balanceError.message}` 
+      });
+      // Continue anyway - the execution will catch this
+    }
 
     // Get best quote with fallbacks
+    console.log(`[attempt] Getting quotes for ${pairLabel}...`);
     const bestQuote = await getBestQuote(sellToken, buyToken, sellAmount);
     if (!bestQuote) {
       log.warn('noquote', { pair: pairLabel, msg: 'no valid quotes from any router' });
       return;
     }
 
+    console.log(`[attempt] ✅ Best quote: ${bestQuote.router} - ${ethers.formatEther(bestQuote.buyAmount)} output`);
+
     // Profitability guard
+    console.log(`[attempt] Checking profitability...`);
     const guard = await profitCheck({
       chainId,
       pair: pairLabel,
@@ -109,7 +150,13 @@ async function attemptOnce(chain, chainId, pairLabel, baseUsd, fromAddress) {
     });
 
     if (!guard.ok) {
-      log.info('skip', { pair: pairLabel, reason: 'profit_guard', netUsd: guard.netUsd, router: bestQuote.router });
+      log.info('skip', { 
+        pair: pairLabel, 
+        reason: 'profit_guard', 
+        netUsd: guard.netUsd, 
+        router: bestQuote.router,
+        msg: `Unprofitable: ${guard.netUsd}` 
+      });
       return;
     }
 
@@ -117,11 +164,43 @@ async function attemptOnce(chain, chainId, pairLabel, baseUsd, fromAddress) {
       pair: pairLabel, 
       router: bestQuote.router, 
       estNetUsd: guard.netUsd,
-      msg: `Estimated profit: $${guard.netUsd}` 
+      gasUsd: guard.gasUsd,
+      grossUsd: guard.grossUsd,
+      msg: `Estimated profit: ${guard.netUsd}` 
     });
 
-    // Execute
+    // Pre-execution checks
+    console.log(`[attempt] Performing pre-execution checks...`);
+    
+    // Check if we need approval
+    const needsApproval = await checkApprovalNeeded(sellToken, fromAddress, sellAmount);
+    if (needsApproval) {
+      console.log(`[attempt] ⚠️  Pre-check: Token approval will be needed`);
+    } else {
+      console.log(`[attempt] ✅ Pre-check: Token already approved`);
+    }
+
+    // Check ETH balance for gas
+    const ethBalance = await provider.getBalance(fromAddress);
+    const estimatedGasCost = BigInt(guard.gasUsd * 1e6) * BigInt(4270) / BigInt(1e6); // Rough ETH cost
+    if (ethBalance < estimatedGasCost) {
+      log.warn('low_eth', { 
+        pair: pairLabel, 
+        ethBalance: ethBalance.toString(),
+        estimatedCost: estimatedGasCost.toString(),
+        msg: 'Low ETH balance for gas' 
+      });
+    }
+
+    // Execute with enhanced logging
+    console.log(`[attempt] 🚀 Executing trade...`);
+    const executionStart = Date.now();
+    
     const res = await execByRouter(chainId, bestQuote.router, bestQuote, pairLabel, guard.netUsd);
+    
+    const executionTime = Date.now() - executionStart;
+    const totalTime = Date.now() - startTime;
+    
     if (res && res.success) {
       log.info('success', { 
         router: bestQuote.router, 
@@ -129,63 +208,130 @@ async function attemptOnce(chain, chainId, pairLabel, baseUsd, fromAddress) {
         txHash: res.txHash, 
         estNetUsd: guard.netUsd,
         sellAmount: bestQuote.sellAmount,
-        buyAmount: bestQuote.buyAmount
+        buyAmount: bestQuote.buyAmount,
+        gasUsed: res.gasUsed,
+        executionTimeMs: executionTime,
+        totalTimeMs: totalTime,
+        approvalTx: res.approvalTx,
+        msg: `SUCCESSFUL TRADE! Profit: ${guard.netUsd}`
       });
+      
+      // Update success metrics
+      runner.consecutiveErrors = 0;
+      runner.lastSuccessTime = Date.now();
+      runner.totalSuccessfulTrades = (runner.totalSuccessfulTrades || 0) + 1;
+      runner.totalProfit = (runner.totalProfit || 0) + guard.netUsd;
+      
+      console.log(`[attempt] 🎉 TRADE #${runner.totalSuccessfulTrades} SUCCESSFUL!`);
+      console.log(`[attempt] 💰 Session profit: ${runner.totalProfit.toFixed(2)}`);
+      
     } else {
       log.warn('fail', { 
         router: bestQuote.router, 
         pair: pairLabel, 
         txHash: (res && res.txHash) || '', 
-        msg: (res && res.error) || 'tx failed' 
+        error: (res && res.error) || 'unknown error',
+        executionTimeMs: executionTime,
+        totalTimeMs: totalTime,
+        approvalTx: res && res.approvalTx,
+        msg: `TRADE FAILED: ${(res && res.error) || 'unknown error'}` 
       });
+      
+      runner.consecutiveErrors++;
     }
+    
   } catch (e) {
     const errorMsg = e.shortMessage || e.message || String(e);
+    runner.consecutiveErrors++;
     
-    // Don't spam logs with known rate limit errors
+    // Categorize errors for better handling
     if (errorMsg.includes('compute units') || errorMsg.includes('rate limit')) {
-      log.warn('ratelimit', { pair: pairLabel, msg: 'rate limited, backing off' });
+      log.warn('ratelimit', { pair: pairLabel, msg: 'Rate limited, backing off' });
     } else if (errorMsg.includes('No pool found') || errorMsg.includes('No USD pricing route')) {
-      log.info('nopool', { pair: pairLabel, msg: 'no suitable pool/route' });
+      log.info('nopool', { pair: pairLabel, msg: 'No suitable pool/route available' });
+    } else if (errorMsg.includes('insufficient funds') || errorMsg.includes('Insufficient')) {
+      log.warn('insufficient_funds', { pair: pairLabel, msg: errorMsg });
+    } else if (errorMsg.includes('nonce') || errorMsg.includes('replacement')) {
+      log.warn('nonce_error', { pair: pairLabel, msg: errorMsg });
     } else {
       log.error('error', { pair: pairLabel, msg: errorMsg });
     }
   }
 }
 
-/** -------------------- runner -------------------- */
+// Helper function to check if approval is needed
+async function checkApprovalNeeded(tokenAddress, walletAddress, requiredAmount) {
+  try {
+    const BASESWAP_ROUTER = process.env.BASESWAP_ROUTER || '0x327Df1E6de05895d2ab08513aaDD9313Fe505d86';
+    const provider = getProvider();
+    
+    const ERC20_ABI = ['function allowance(address,address) view returns (uint256)'];
+    const tokenContract = new ethers.Contract(tokenAddress, ERC20_ABI, provider);
+    
+    const currentAllowance = await tokenContract.allowance(walletAddress, BASESWAP_ROUTER);
+    return currentAllowance < requiredAmount;
+  } catch {
+    return true; // Assume approval needed if check fails
+  }
+}
+
+/** -------------------- enhanced runner with performance tracking -------------------- */
 const runner = {
   timer: null,
   running: false,
   pairs: [],
-  baseUsd: 30,
-  intervalMs: 3000, // Start with 3 second intervals
+  baseUsd: 15,
+  intervalMs: 2000,
   idx: 0,
   consecutiveErrors: 0,
-  lastSuccessTime: Date.now()
+  lastSuccessTime: Date.now(),
+  totalSuccessfulTrades: 0,
+  totalProfit: 0,
+  startTime: Date.now()
 };
 
 function rpcInterval() {
-  // Much more conservative intervals to avoid rate limits
   const chain = (cfg.EVM_CHAIN || 'base').toUpperCase();
   const key = `${chain}_RPC_RPS`;
-  const rps = process.env[key] || process.env.BASE_RPC_RPS || '0.5';
-  return Math.max(3000, intervalFromRps(rps)); // Minimum 3 seconds
+  const rps = process.env[key] || process.env.BASE_RPC_RPS || '1';
+  return Math.max(1000, intervalFromRps(rps)); // Minimum 1 second
 }
 
 function isRunning() { return runner.running; }
 
 function adjustInterval() {
   const timeSinceSuccess = Date.now() - runner.lastSuccessTime;
+  const originalInterval = rpcInterval();
   
   if (runner.consecutiveErrors > 10) {
     // Too many errors, slow down significantly
-    runner.intervalMs = Math.min(runner.intervalMs * 2, 30000); // Max 30 seconds
-    console.log(`[bot] Too many errors, slowing to ${runner.intervalMs}ms intervals`);
-  } else if (runner.consecutiveErrors === 0 && timeSinceSuccess < 60000) {
-    // Recent success, can speed up slightly
-    runner.intervalMs = Math.max(runner.intervalMs * 0.9, 2000); // Min 2 seconds
+    runner.intervalMs = Math.min(originalInterval * 3, 30000); // Max 30 seconds
+    console.log(`[bot] Too many errors (${runner.consecutiveErrors}), slowing to ${runner.intervalMs}ms intervals`);
+  } else if (runner.consecutiveErrors > 5) {
+    // Some errors, slow down moderately
+    runner.intervalMs = Math.min(originalInterval * 2, 15000); // Max 15 seconds
+    console.log(`[bot] Some errors (${runner.consecutiveErrors}), slowing to ${runner.intervalMs}ms intervals`);
+  } else if (runner.consecutiveErrors === 0 && runner.totalSuccessfulTrades > 0) {
+    // Recent success, can maintain or slightly increase speed
+    runner.intervalMs = Math.max(originalInterval, 1500); // Min 1.5 seconds
+  } else {
+    // Default interval
+    runner.intervalMs = originalInterval;
   }
+}
+
+function getSessionStats() {
+  const runtimeMinutes = (Date.now() - runner.startTime) / 60000;
+  const successRate = runner.totalSuccessfulTrades > 0 ? 
+    (runner.totalSuccessfulTrades / (runner.totalSuccessfulTrades + runner.consecutiveErrors)) * 100 : 0;
+  
+  return {
+    runtime: `${runtimeMinutes.toFixed(1)}m`,
+    trades: runner.totalSuccessfulTrades,
+    profit: `${(runner.totalProfit || 0).toFixed(2)}`,
+    successRate: `${successRate.toFixed(1)}%`,
+    errorStreak: runner.consecutiveErrors
+  };
 }
 
 function start() {
@@ -193,18 +339,26 @@ function start() {
 
   const chainId = parseInt(process.env.EVM_CHAIN_ID || '8453', 10);
   runner.pairs = loadPairs();
-  runner.baseUsd = parseFloat(process.env.BASE_TRADE_USD || '10'); // Smaller default
-  runner.intervalMs = Math.max(3000, parseInt(rpcInterval(), 10));
+  runner.baseUsd = parseFloat(process.env.BASE_TRADE_USD || '15');
+  runner.intervalMs = rpcInterval();
   runner.running = true;
   runner.consecutiveErrors = 0;
+  runner.startTime = Date.now();
 
   log.info('boot', {
-    msg: 'bot started with robust error handling',
+    msg: 'Enhanced bot started with robust execution',
     chainId,
     pairs: runner.pairs.slice(0, 5).join('|') + (runner.pairs.length > 5 ? `|...(+${runner.pairs.length - 5})` : ''),
     baseUsd: runner.baseUsd,
-    intervalMs: runner.intervalMs
+    intervalMs: runner.intervalMs,
+    totalPairs: runner.pairs.length
   });
+
+  console.log(`[bot] 🚀 Enhanced Swatticus bot starting!`);
+  console.log(`[bot] 📊 Trading pairs: ${runner.pairs.length}`);
+  console.log(`[bot] 💰 Trade size: ${runner.baseUsd}`);
+  console.log(`[bot] ⏱️  Scan interval: ${runner.intervalMs}ms`);
+  console.log(`[bot] 🎯 Min profit: ${process.env.MIN_PROFIT_USD || 3}`);
 
   runner.timer = setInterval(async () => {
     try {
@@ -213,16 +367,18 @@ function start() {
       const pair = runner.pairs[runner.idx % runner.pairs.length];
       runner.idx = (runner.idx + 1) % runner.pairs.length;
 
+      // Show periodic stats
+      if (runner.idx % 20 === 0 && runner.totalSuccessfulTrades > 0) {
+        const stats = getSessionStats();
+        console.log(`[bot] 📊 Session stats: ${stats.trades} trades, ${stats.profit}, ${stats.successRate} success, ${stats.runtime}`);
+      }
+
       log.info('tick', { msg: 'scanning pair', pair });
       
       const wallet = new ethers.Wallet(process.env.EVM_PRIVATE_KEY, getProvider());
       const from = await wallet.getAddress();
 
       await attemptOnce(cfg.EVM_CHAIN, chainId, pair, runner.baseUsd, from);
-      
-      // Success - reset error counter
-      runner.consecutiveErrors = 0;
-      runner.lastSuccessTime = Date.now();
       
     } catch (e) {
       const m = e.shortMessage || e.message || String(e);
@@ -234,8 +390,8 @@ function start() {
       }
       
       // Adaptive backoff on errors
-      if (runner.consecutiveErrors % 5 === 0) {
-        console.log(`[bot] ${runner.consecutiveErrors} consecutive errors, backing off...`);
+      if (runner.consecutiveErrors % 10 === 0) {
+        console.log(`[bot] ⚠️  ${runner.consecutiveErrors} consecutive errors, implementing backoff...`);
         await new Promise(r => setTimeout(r, Math.min(runner.consecutiveErrors * 1000, 10000)));
       }
     }
@@ -256,8 +412,17 @@ function stop() {
     runner.timer = null;
   }
   runner.running = false;
-  log.info('boot', { msg: 'bot stopped' });
+  
+  const stats = getSessionStats();
+  console.log(`[bot] 🛑 Bot stopped after ${stats.runtime}`);
+  console.log(`[bot] 📊 Final stats: ${stats.trades} trades, ${stats.profit}, ${stats.successRate} success`);
+  
+  log.info('boot', { 
+    msg: 'Enhanced bot stopped',
+    ...stats
+  });
+  
   return { running: false };
 }
 
-module.exports = { start, stop, isRunning };
+module.exports = { start, stop, isRunning, getSessionStats };
