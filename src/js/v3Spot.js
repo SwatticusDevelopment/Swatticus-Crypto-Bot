@@ -1,6 +1,6 @@
-// src/js/v3Spot.js - FINAL FIXED VERSION with correct decimal adjustment
+// src/js/v3Spot.js - UPDATED with better error handling and provider usage
 const { ethers } = require('ethers');
-const cfg = require('./multichainConfig');
+const { getProvider } = require('./robustProvider');
 
 const FACTORY_ABI = ['function getPool(address tokenA, address tokenB, uint24 fee) view returns (address)'];
 const POOL_ABI = [
@@ -10,20 +10,19 @@ const POOL_ABI = [
 ];
 const ERC20_ABI = ['function decimals() view returns (uint8)'];
 
-function provider(){ return new ethers.JsonRpcProvider(cfg.EVM_RPC_URL, cfg.EVM_CHAIN_ID); }
+const UNI_V3_FACTORY = process.env.UNI_V3_FACTORY || '0x33128a8fC17869897dcE68Ed026d694621f6FDfD';
 
-const same = (a,b) => String(a).toLowerCase() === String(b).toLowerCase();
-const matchesWethUsdc = (a,b) => { 
-  const WETH = process.env.WETH_ADDRESS || ''; 
-  const USDC = process.env.USDC_ADDRESS || ''; 
-  return (same(a,WETH) && same(b,USDC)) || (same(a,USDC) && same(b,WETH)); 
+// Known decimal overrides for Base
+const DECIMAL_OVERRIDES = {
+  '0x4200000000000000000000000000000000000006': 18, // WETH
+  '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913': 6,  // USDC
+  '0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca': 6,  // USDbC
+  '0xeb466342c4d449bc9f53a865d5cb90586f405215': 6   // USDT
 };
 
-const DEFAULT_BASE_POOLS = {
-  500: '0xd0b53D9277642d899DF5C87A3966A349A798F224',
-  3000: '0x6c561B446416E1A00E8E93E221854d6eA4171372',
-  10000: '0x0b1C2DCbBfA744ebD3fC17fF1A96A1E1Eb4B2d69'
-};
+// Cache for pool addresses and decimals
+const poolCache = new Map();
+const decimalCache = new Map();
 
 function safeToNumber(value) {
   if (typeof value === 'bigint') {
@@ -36,147 +35,182 @@ function safeToNumber(value) {
 }
 
 async function getPoolAddr(tokenA, tokenB, fee) {
-  const pv = provider();
-  const factory = new ethers.Contract(cfg.UNI_V3_FACTORY, FACTORY_ABI, pv);
-  
-  let pool = ethers.ZeroAddress;
+  const cacheKey = `${tokenA.toLowerCase()}:${tokenB.toLowerCase()}:${fee}`;
+  if (poolCache.has(cacheKey)) {
+    return poolCache.get(cacheKey);
+  }
   
   try {
-    pool = await factory.getPool(tokenA, tokenB, fee);
-  } catch (e) {
-    console.log(`[v3spot] Factory call failed: ${e.message}`);
-  }
-  
-  if (pool === ethers.ZeroAddress && matchesWethUsdc(tokenA, tokenB)) {
-    const env = process.env[`UNI_V3_WETH_USDC_POOL_${fee}`];
-    if (env && ethers.isAddress(env)) {
-      console.log(`[v3spot] Using env pool for fee ${fee}: ${env}`);
-      pool = env;
+    const provider = getProvider();
+    const factory = new ethers.Contract(UNI_V3_FACTORY, FACTORY_ABI, provider);
+    
+    const pool = await factory.call({
+      to: UNI_V3_FACTORY,
+      data: factory.interface.encodeFunctionData('getPool', [
+        ethers.getAddress(tokenA),
+        ethers.getAddress(tokenB), 
+        fee
+      ])
+    });
+    
+    const [poolAddress] = factory.interface.decodeFunctionResult('getPool', pool);
+    
+    if (!poolAddress || poolAddress === ethers.ZeroAddress) {
+      poolCache.set(cacheKey, null);
+      return null;
     }
+    
+    poolCache.set(cacheKey, poolAddress);
+    return poolAddress;
+    
+  } catch (error) {
+    console.log(`[v3spot] Factory call failed for ${tokenA}/${tokenB} fee ${fee}: ${error.message}`);
+    return null;
   }
-  
-  if (pool === ethers.ZeroAddress && Number(cfg.EVM_CHAIN_ID) === 8453 && matchesWethUsdc(tokenA, tokenB)) {
-    const hard = DEFAULT_BASE_POOLS[fee];
-    if (hard) {
-      console.log(`[v3spot] Using hardcoded Base pool for fee ${fee}: ${hard}`);
-      pool = hard;
-    }
-  }
-  
-  if (!pool || pool === ethers.ZeroAddress) {
-    throw new Error(`No pool found for ${tokenA}/${tokenB} fee=${fee}`);
-  }
-  
-  return pool;
 }
 
-async function ercDecimals(addr) {
-  const erc = new ethers.Contract(addr, ERC20_ABI, provider());
-  const decimals = await erc.decimals();
-  return safeToNumber(decimals);
+async function getDecimals(addr) {
+  const address = addr.toLowerCase();
+  
+  if (decimalCache.has(address)) {
+    return decimalCache.get(address);
+  }
+  
+  if (DECIMAL_OVERRIDES[address]) {
+    decimalCache.set(address, DECIMAL_OVERRIDES[address]);
+    return DECIMAL_OVERRIDES[address];
+  }
+  
+  try {
+    const provider = getProvider();
+    const result = await provider.call({
+      to: addr,
+      data: '0x313ce567' // decimals() selector
+    });
+    
+    if (!result || result === '0x') {
+      decimalCache.set(address, 18);
+      return 18;
+    }
+    
+    const decimals = parseInt(result, 16);
+    if (!Number.isFinite(decimals) || decimals < 0 || decimals > 77) {
+      decimalCache.set(address, 18);
+      return 18;
+    }
+    
+    decimalCache.set(address, decimals);
+    return decimals;
+    
+  } catch (error) {
+    console.log(`[v3spot] Failed to get decimals for ${addr}: ${error.message}`);
+    decimalCache.set(address, 18);
+    return 18;
+  }
 }
 
 async function spotAmountOut(tokenIn, tokenOut, fee, amountInRaw) {
   try {
-    const pv = provider();
     const poolAddr = await getPoolAddr(tokenIn, tokenOut, fee);
+    if (!poolAddr) {
+      throw new Error(`No pool found for ${tokenIn}/${tokenOut} fee=${fee}`);
+    }
     
-    console.log(`[v3spot] Using pool ${poolAddr} for ${tokenIn}/${tokenOut} fee=${fee}`);
+    const provider = getProvider();
     
-    const pool = new ethers.Contract(poolAddr, POOL_ABI, pv);
-    
-    const [slot0, token0, token1] = await Promise.all([
-      pool.slot0(),
-      pool.token0(),
-      pool.token1()
+    // Get pool data
+    const [slot0Result, token0Result, token1Result] = await Promise.all([
+      provider.call({
+        to: poolAddr,
+        data: '0x3850c7bd' // slot0() selector
+      }),
+      provider.call({
+        to: poolAddr,
+        data: '0x0dfe1681' // token0() selector  
+      }),
+      provider.call({
+        to: poolAddr,
+        data: '0xd21220a7' // token1() selector
+      })
     ]);
     
-    const sqrtPriceX96 = slot0[0];
-    const tick = safeToNumber(slot0[1]);
+    if (!slot0Result || slot0Result === '0x' || !token0Result || !token1Result) {
+      throw new Error('Failed to read pool data');
+    }
     
-    const t0 = token0.toLowerCase();
-    const t1 = token1.toLowerCase();
-    const aIn = ethers.getAddress(tokenIn).toLowerCase();
-    const aOut = ethers.getAddress(tokenOut).toLowerCase();
+    // Decode results
+    const slot0Data = ethers.AbiCoder.defaultAbiCoder().decode(
+      ['uint160', 'int24', 'uint16', 'uint16', 'uint16', 'uint8', 'bool'],
+      slot0Result
+    );
     
-    console.log(`[v3spot] Pool tokens: token0=${t0}, token1=${t1}`);
-    console.log(`[v3spot] Trade: ${aIn} -> ${aOut}`);
-    console.log(`[v3spot] Raw tick: ${tick}`);
+    const token0 = ethers.getAddress('0x' + token0Result.slice(26));
+    const token1 = ethers.getAddress('0x' + token1Result.slice(26));
     
+    const sqrtPriceX96 = BigInt(slot0Data[0].toString());
+    
+    if (sqrtPriceX96 === 0n) {
+      throw new Error('Pool not initialized');
+    }
+    
+    // Get decimals
     const [dec0, dec1] = await Promise.all([
-      ercDecimals(t0),
-      ercDecimals(t1)
+      getDecimals(token0),
+      getDecimals(token1)
     ]);
     
-    console.log(`[v3spot] Decimals: token0=${dec0}, token1=${dec1}`);
+    // Determine direction
+    const tokenInAddr = ethers.getAddress(tokenIn);
+    const tokenOutAddr = ethers.getAddress(tokenOut);
     
-    // Use sqrtPriceX96 directly for maximum precision
-    const sqrtPrice = safeToNumber(sqrtPriceX96);
-    const Q96 = Math.pow(2, 96);
+    const isToken0In = tokenInAddr.toLowerCase() === token0.toLowerCase();
+    const isToken1Out = tokenOutAddr.toLowerCase() === token1.toLowerCase();
     
-    // sqrtPriceX96 = sqrt(price) * 2^96
-    // where price = token1/token0 (amount of token1 per 1 token0)
-    const sqrtRatio = sqrtPrice / Q96;
-    const rawPrice = sqrtRatio * sqrtRatio;
+    if (!(isToken0In && isToken1Out) && !(tokenInAddr.toLowerCase() === token1.toLowerCase() && tokenOutAddr.toLowerCase() === token0.toLowerCase())) {
+      throw new Error('Token addresses do not match pool');
+    }
     
-    console.log(`[v3spot] sqrtPriceX96: ${sqrtPrice}`);
-    console.log(`[v3spot] Raw price (token1/token0): ${rawPrice}`);
+    // Calculate price using slot0
+    const Q96 = 2n ** 96n;
+    const sqrtPrice = sqrtPriceX96;
+    const price = (sqrtPrice * sqrtPrice) / (Q96 * Q96);
     
-    // CRITICAL FIX: Correct decimal adjustment
-    // The raw price is already in the right units, but we need to adjust for decimal differences
-    // If token0 has 18 decimals and token1 has 6 decimals:
-    // 1 unit of token0 (1e18 wei) should give rawPrice units of token1 (in wei, 1e6 scale)
-    // So we need to multiply by 10^(dec0 - dec1) = 10^(18-6) = 10^12
-    const decimalAdjustedPrice = rawPrice * Math.pow(10, dec0 - dec1);
+    // Apply decimal adjustment
+    const decimalDiff = BigInt(dec0 - dec1);
+    let adjustedPrice;
     
-    console.log(`[v3spot] Decimal adjusted price: ${decimalAdjustedPrice}`);
-    
-    // Determine input/output decimals and calculate the conversion
-    const inDec = (aIn === t0 ? dec0 : dec1);
-    const outDec = (aOut === t1 ? dec1 : dec0);
-    
-    const amountInHuman = safeToNumber(amountInRaw) / Math.pow(10, inDec);
-    
-    // Apply pool fee (fee is in basis points, e.g., 500 = 0.05%)
-    const feePct = (fee || 500) / 1e6;
-    const amountAfterFee = amountInHuman * (1 - feePct);
-    
-    console.log(`[v3spot] Amount in: ${amountInHuman}, after fee: ${amountAfterFee}`);
-    
-    let outHuman;
-    
-    if (aIn === t0 && aOut === t1) {
-      // token0 -> token1, use price as is
-      outHuman = amountAfterFee * decimalAdjustedPrice;
-      console.log(`[v3spot] token0 -> token1: ${amountAfterFee} * ${decimalAdjustedPrice} = ${outHuman}`);
-    } else if (aIn === t1 && aOut === t0) {
-      // token1 -> token0, invert the price
-      const invertedPrice = 1 / decimalAdjustedPrice;
-      outHuman = amountAfterFee * invertedPrice;
-      console.log(`[v3spot] token1 -> token0: ${amountAfterFee} * ${invertedPrice} = ${outHuman}`);
+    if (decimalDiff > 0n) {
+      adjustedPrice = price * (10n ** decimalDiff);
+    } else if (decimalDiff < 0n) {
+      adjustedPrice = price / (10n ** (-decimalDiff));
     } else {
-      throw new Error('Input/output tokens do not match pool tokens');
+      adjustedPrice = price;
     }
     
-    if (!isFinite(outHuman) || outHuman <= 0) {
-      throw new Error(`Output amount calculation resulted in invalid number: ${outHuman}`);
+    // Apply fee (fee is in units where 1e6 = 100%)
+    const amountIn = BigInt(amountInRaw);
+    const feeAmount = (amountIn * BigInt(fee)) / 1000000n;
+    const amountAfterFee = amountIn - feeAmount;
+    
+    let amountOut;
+    
+    if (isToken0In && isToken1Out) {
+      // token0 -> token1
+      amountOut = (amountAfterFee * adjustedPrice) / (Q96 * Q96);
+    } else {
+      // token1 -> token0
+      amountOut = (amountAfterFee * Q96 * Q96) / adjustedPrice;
     }
     
-    // Convert back to wei/raw units
-    const outRaw = Math.floor(outHuman * Math.pow(10, outDec));
-    
-    console.log(`[v3spot] Final amount out: ${outHuman} human, ${outRaw} raw`);
-    
-    // Sanity check - output should be > 0
-    if (outRaw <= 0) {
-      throw new Error(`Calculated output amount is zero or negative: ${outRaw}`);
+    if (amountOut <= 0n) {
+      throw new Error('Calculated output is zero or negative');
     }
     
-    return String(outRaw);
+    return amountOut.toString();
     
-  } catch (e) {
-    console.log(`[v3spot] Error in spotAmountOut: ${e.message}`);
-    throw e;
+  } catch (error) {
+    console.log(`[v3spot] Error in spotAmountOut: ${error.message}`);
+    throw error;
   }
 }
 

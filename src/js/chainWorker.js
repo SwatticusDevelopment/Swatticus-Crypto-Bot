@@ -1,11 +1,12 @@
-// chainWorker.js — full worker scanning pairs list (excludes WETH/USDC if configured)
+// src/js/chainWorker.js - Updated worker with robust error handling
 const { ethers } = require('ethers');
 const cfg = require('./multichainConfig');
-const { fanoutQuotes } = require('./evmRouters');
+const { getBestQuote } = require('./robustQuoter');
 const { execByRouter } = require('./evmExecutors');
 const { check: profitCheck } = require('./profitGuard');
 const { amountForUsdToken } = require('./sizing');
 const { resolveToken } = require('./tokenResolver');
+const { getProvider } = require('./robustProvider');
 const log = require('./logger');
 const fs = require('fs');
 const path = require('path');
@@ -13,39 +14,11 @@ const path = require('path');
 /** -------------------- helpers -------------------- */
 function intervalFromRps(val) {
   const r = parseFloat(val || '0.5');
-  return Math.max(200, Math.floor(1000 / Math.max(r, 0.01)));
+  return Math.max(2000, Math.floor(1000 / Math.max(r, 0.1))); // Much more conservative
 }
 
 function toAddrLower(v) {
   return String(v || '').trim().toLowerCase();
-}
-
-function normalizeQuote(q, sellToken, buyToken, sellAmount) {
-  if (!q || typeof q !== 'object') return null;
-  const router = q.router || 'unknown';
-  // Expect strings for amounts; coerce to BigInt strings if needed
-  const out = {
-    router,
-    sellToken,
-    buyToken,
-    sellAmount: typeof q.sellAmount === 'string' ? q.sellAmount : (typeof sellAmount === 'bigint' ? sellAmount.toString() : String(q.sellAmount || sellAmount || '0')),
-    buyAmount: typeof q.buyAmount === 'string' ? q.buyAmount : String(q.buyAmount || '0'),
-    original: q
-  };
-  return out;
-}
-
-async function chooseBest(chain, chainId, sellToken, buyToken, sellAmount) {
-  const quotes = await fanoutQuotes(chain, chainId, sellToken, buyToken, sellAmount);
-  const normalized = quotes.map(q => normalizeQuote(q, sellToken, buyToken, sellAmount)).filter(Boolean);
-  // pick max buyAmount
-  normalized.sort((a, b) => {
-    const ab = BigInt(a.buyAmount || '0');
-    const bb = BigInt(b.buyAmount || '0');
-    if (ab === bb) return 0;
-    return ab > bb ? -1 : 1;
-  });
-  return normalized[0] || null;
 }
 
 function parsePairLabel(label) {
@@ -65,10 +38,6 @@ function uniq(arr) {
     }
   }
   return out;
-}
-
-function normalizePairStr(a, b) {
-  return `${toAddrLower(a)}/${toAddrLower(b)}`;
 }
 
 function loadPairs() {
@@ -109,6 +78,7 @@ function loadPairs() {
 
 /** -------------------- core attempt -------------------- */
 async function attemptOnce(chain, chainId, pairLabel, baseUsd, fromAddress) {
+  let provider;
   try {
     const { sell, buy } = parsePairLabel(pairLabel);
 
@@ -116,16 +86,16 @@ async function attemptOnce(chain, chainId, pairLabel, baseUsd, fromAddress) {
     const sellToken = await resolveToken(sell);
     const buyToken = await resolveToken(buy);
 
-    // Provider
-    const provider = new ethers.JsonRpcProvider(process.env.EVM_RPC_URL, chainId);
+    // Use our robust provider
+    provider = getProvider();
 
     // Size trade: get N wei of sellToken worth `baseUsd`
     const sellAmount = await amountForUsdToken(provider, sellToken, baseUsd);
 
-    // Fanout quotes across configured routers
-    const best = await chooseBest(cfg.EVM_CHAIN, chainId, sellToken, buyToken, sellAmount);
-    if (!best) {
-      log.warn('noquote', { pair: pairLabel, msg: 'no valid quotes' });
+    // Get best quote with fallbacks
+    const bestQuote = await getBestQuote(sellToken, buyToken, sellAmount);
+    if (!bestQuote) {
+      log.warn('noquote', { pair: pairLabel, msg: 'no valid quotes from any router' });
       return;
     }
 
@@ -135,23 +105,51 @@ async function attemptOnce(chain, chainId, pairLabel, baseUsd, fromAddress) {
       pair: pairLabel,
       side: 'sell',
       sellAmountWei: sellAmount,
-      normQuote: best
+      normQuote: bestQuote
     });
 
     if (!guard.ok) {
-      log.info('skip', { pair: pairLabel, reason: 'profit_guard', netUsd: guard.netUsd });
+      log.info('skip', { pair: pairLabel, reason: 'profit_guard', netUsd: guard.netUsd, router: bestQuote.router });
       return;
     }
 
+    log.info('opportunity', { 
+      pair: pairLabel, 
+      router: bestQuote.router, 
+      estNetUsd: guard.netUsd,
+      msg: `Estimated profit: $${guard.netUsd}` 
+    });
+
     // Execute
-    const res = await execByRouter(chainId, best.router, best, pairLabel, guard.netUsd);
+    const res = await execByRouter(chainId, bestQuote.router, bestQuote, pairLabel, guard.netUsd);
     if (res && res.success) {
-      log.info('success', { router: best.router, pair: pairLabel, txHash: res.txHash, estNetUsd: guard.netUsd });
+      log.info('success', { 
+        router: bestQuote.router, 
+        pair: pairLabel, 
+        txHash: res.txHash, 
+        estNetUsd: guard.netUsd,
+        sellAmount: bestQuote.sellAmount,
+        buyAmount: bestQuote.buyAmount
+      });
     } else {
-      log.warn('fail', { router: best.router, pair: pairLabel, txHash: (res && res.txHash) || '', msg: (res && res.error) || 'tx failed' });
+      log.warn('fail', { 
+        router: bestQuote.router, 
+        pair: pairLabel, 
+        txHash: (res && res.txHash) || '', 
+        msg: (res && res.error) || 'tx failed' 
+      });
     }
   } catch (e) {
-    log.error('error', { pair: pairLabel, msg: e.shortMessage || e.message || String(e) });
+    const errorMsg = e.shortMessage || e.message || String(e);
+    
+    // Don't spam logs with known rate limit errors
+    if (errorMsg.includes('compute units') || errorMsg.includes('rate limit')) {
+      log.warn('ratelimit', { pair: pairLabel, msg: 'rate limited, backing off' });
+    } else if (errorMsg.includes('No pool found') || errorMsg.includes('No USD pricing route')) {
+      log.info('nopool', { pair: pairLabel, msg: 'no suitable pool/route' });
+    } else {
+      log.error('error', { pair: pairLabel, msg: errorMsg });
+    }
   }
 }
 
@@ -161,33 +159,49 @@ const runner = {
   running: false,
   pairs: [],
   baseUsd: 30,
-  intervalMs: 1000,
-  idx: 0
+  intervalMs: 3000, // Start with 3 second intervals
+  idx: 0,
+  consecutiveErrors: 0,
+  lastSuccessTime: Date.now()
 };
 
 function rpcInterval() {
-  // Allow chain-specific RPS (e.g., BASE_RPC_RPS) or fallback BASE_RPC_RPS
+  // Much more conservative intervals to avoid rate limits
   const chain = (cfg.EVM_CHAIN || 'base').toUpperCase();
   const key = `${chain}_RPC_RPS`;
   const rps = process.env[key] || process.env.BASE_RPC_RPS || '0.5';
-  return intervalFromRps(rps);
+  return Math.max(3000, intervalFromRps(rps)); // Minimum 3 seconds
 }
 
 function isRunning() { return runner.running; }
+
+function adjustInterval() {
+  const timeSinceSuccess = Date.now() - runner.lastSuccessTime;
+  
+  if (runner.consecutiveErrors > 10) {
+    // Too many errors, slow down significantly
+    runner.intervalMs = Math.min(runner.intervalMs * 2, 30000); // Max 30 seconds
+    console.log(`[bot] Too many errors, slowing to ${runner.intervalMs}ms intervals`);
+  } else if (runner.consecutiveErrors === 0 && timeSinceSuccess < 60000) {
+    // Recent success, can speed up slightly
+    runner.intervalMs = Math.max(runner.intervalMs * 0.9, 2000); // Min 2 seconds
+  }
+}
 
 function start() {
   if (runner.running) return { running: true };
 
   const chainId = parseInt(process.env.EVM_CHAIN_ID || '8453', 10);
   runner.pairs = loadPairs();
-  runner.baseUsd = parseFloat(process.env.BASE_TRADE_USD || '30');
-  runner.intervalMs = Math.max(200, parseInt(rpcInterval(), 10));
+  runner.baseUsd = parseFloat(process.env.BASE_TRADE_USD || '10'); // Smaller default
+  runner.intervalMs = Math.max(3000, parseInt(rpcInterval(), 10));
   runner.running = true;
+  runner.consecutiveErrors = 0;
 
   log.info('boot', {
-    msg: 'bot started',
+    msg: 'bot started with robust error handling',
     chainId,
-    pairs: runner.pairs.slice(0, 10).join('|') + (runner.pairs.length > 10 ? `|...(+${runner.pairs.length - 10})` : ''),
+    pairs: runner.pairs.slice(0, 5).join('|') + (runner.pairs.length > 5 ? `|...(+${runner.pairs.length - 5})` : ''),
     baseUsd: runner.baseUsd,
     intervalMs: runner.intervalMs
   });
@@ -195,20 +209,42 @@ function start() {
   runner.timer = setInterval(async () => {
     try {
       if (!runner.pairs.length) return;
+      
       const pair = runner.pairs[runner.idx % runner.pairs.length];
       runner.idx = (runner.idx + 1) % runner.pairs.length;
 
-      log.info('tick', { msg: 'quote fanout', pair });
-      const wallet = new ethers.Wallet(process.env.EVM_PRIVATE_KEY, new ethers.JsonRpcProvider(process.env.EVM_RPC_URL, chainId));
+      log.info('tick', { msg: 'scanning pair', pair });
+      
+      const wallet = new ethers.Wallet(process.env.EVM_PRIVATE_KEY, getProvider());
       const from = await wallet.getAddress();
 
       await attemptOnce(cfg.EVM_CHAIN, chainId, pair, runner.baseUsd, from);
+      
+      // Success - reset error counter
+      runner.consecutiveErrors = 0;
+      runner.lastSuccessTime = Date.now();
+      
     } catch (e) {
       const m = e.shortMessage || e.message || String(e);
-      log.error('error', { msg: m });
-      // brief backoff if something noisy happens
-      await new Promise(r => setTimeout(r, Math.min(runner.intervalMs * 2, 8000)));
+      runner.consecutiveErrors++;
+      
+      // Don't log every rate limit error
+      if (!m.includes('compute units') && !m.includes('rate limit')) {
+        log.error('error', { msg: m });
+      }
+      
+      // Adaptive backoff on errors
+      if (runner.consecutiveErrors % 5 === 0) {
+        console.log(`[bot] ${runner.consecutiveErrors} consecutive errors, backing off...`);
+        await new Promise(r => setTimeout(r, Math.min(runner.consecutiveErrors * 1000, 10000)));
+      }
     }
+    
+    // Adjust intervals based on recent performance
+    if (runner.idx % 10 === 0) {
+      adjustInterval();
+    }
+    
   }, runner.intervalMs);
 
   return { running: true };

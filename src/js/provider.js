@@ -1,49 +1,75 @@
-// ESM module
-// Hardened provider for Base: static network + RPC rate limiting + optional fallback across multiple HTTP URLs.
-// Drop-in replacement for your existing provider.js
 
 import { JsonRpcProvider, FallbackProvider } from "ethers";
-import Bottleneck from "bottleneck";
 
-const network = { chainId: 8453, name: "base" };
-
-const urls = [
-  process.env.RPC_URL,
-  process.env.RPC_URL_2,
-  process.env.RPC_URL_3,
-].filter(Boolean);
-
-if (urls.length === 0) {
-  throw new Error("RPC_URL is required");
+/**
+ * Minimal async rate limiter for provider.send
+ */
+class SimpleLimiter {
+  constructor(minTimeMs = 120) {
+    this.minTimeMs = minTimeMs;
+    this.queue = [];
+    this.running = false;
+  }
+  schedule(fn) {
+    return new Promise((resolve, reject) => {
+      this.queue.push({ fn, resolve, reject });
+      this.#run();
+    });
+  }
+  async #run() {
+    if (this.running) return;
+    this.running = true;
+    while (this.queue.length) {
+      const { fn, resolve, reject } = this.queue.shift();
+      try {
+        const res = await fn();
+        resolve(res);
+      } catch (e) {
+        reject(e);
+      }
+      await new Promise((r) => setTimeout(r, this.minTimeMs));
+    }
+    this.running = false;
+  }
 }
 
-// Only use HTTP endpoints here; disable WS for now to avoid double eth_chainId probes.
-const providers = urls.map((url) => new JsonRpcProvider(url, network));
+/**
+ * Create a static, rate-limited FallbackProvider for Base (chainId 8453)
+ * @param {string[]} urls
+ * @param {{ chainId?: number, name?: string, stallTimeout?: number, minTimeMs?: number }} opts
+ */
+export function makeProvider(urls, opts = {}) {
+  const {
+    chainId = 8453,
+    name = "base",
+    stallTimeout = 750,
+    minTimeMs = 120,
+  } = opts;
 
-// quorum = 1 (first that responds). All children are static to Base, so no network-detect loop.
-const baseProvider =
-  providers.length === 1
-    ? providers[0]
-    : new FallbackProvider(providers.map((p) => ({ provider: p, weight: 1 })), 1);
+  if (!Array.isArray(urls) || urls.length === 0 || !urls[0]) {
+    throw new Error("makeProvider: provide at least one RPC URL");
+  }
 
-// ---- Throttle & burst control -------------------------------------------------
-const tokensPerSec = Number(process.env.RPC_TOKENS_PER_SEC ?? 10); // Alchemy free tier: keep conservative
-const minTime = Number(process.env.RPC_MIN_TIME_MS ?? 120);
-const maxConc = Number(process.env.RPC_MAX_CONCURRENT ?? 1);
+  const providers = urls
+    .filter(Boolean)
+    .map((u, i) => new JsonRpcProvider(u, { chainId, name }));
 
-const limiter = new Bottleneck({
-  reservoir: tokensPerSec,
-  reservoirRefreshAmount: tokensPerSec,
-  reservoirRefreshInterval: 1000,
-  minTime,
-  maxConcurrent: maxConc,
-});
+  const fp = new FallbackProvider(
+    providers.map((p, i) => ({
+      provider: p,
+      priority: i + 1,
+      stallTimeout,
+    })),
+    1
+  );
 
-const rawSend = baseProvider.send.bind(baseProvider);
-baseProvider.send = (method, params) => {
-  // Eth providers love to spam eth_chainId when network isn't static. We made it static,
-  // but still throttle everything uniformly to smooth CPU bursts at the RPC.
-  return limiter.schedule(() => rawSend(method, params));
-};
+  // Rate-limit the low-level JSON-RPC send
+  const limiter = new SimpleLimiter(minTimeMs);
+  const _send = fp.send.bind(fp);
+  fp.send = (method, params) => limiter.schedule(() => _send(method, params));
 
-export default baseProvider;
+  // Useful defaults
+  fp.polling = true;
+
+  return fp;
+}

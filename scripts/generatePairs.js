@@ -12,7 +12,9 @@ const path = require('path');
     if (!process.env.EVM_CHAIN_ID) process.env.EVM_CHAIN_ID = '8453';
 
     const { discoverPairs } = require('../src/js/discoverPairs');
-    const pairs = await discoverPairs({ exclude: process.env.EVM_PAIR_EXCLUDE });
+    const pairs = await discoverPairs({
+      exclude: process.env.EVM_PAIR_EXCLUDE,
+    });
 
     fs.writeFileSync(outPath, JSON.stringify(pairs, null, 2));
     console.log(`[pairs] wrote ${pairs.length} pairs -> ${outPath}`);

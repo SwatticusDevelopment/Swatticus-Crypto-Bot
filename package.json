@@ -8,7 +8,7 @@
     "start": "node index.js",
     "dev": "nodemon index.js",
     "debug:quote": "node tools/debug-quote.js",
-    "test:quote": "node tools/test-quote.js"
+     "pairs": "node scripts/generatePairs.js"
   },
   "dependencies": {
     "dotenv": "^16.4.5",
