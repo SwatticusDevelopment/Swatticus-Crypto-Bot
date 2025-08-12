@@ -1,0 +1,79 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Swatticus Technology Slippage System</title>
+<style>
+:root{ --bg:#0a1020; --panel:#0f1833; --text:#cfe3ff; --muted:#7f9ccf; --accent:#4ea1ff; --success:#20c997; --warn:#ffb020; --error:#ff4d4f; --quote:#8bd3ff; --op:#9eff8b; --exec:#ffd166; }
+*{box-sizing:border-box} html,body{height:100%} body{margin:0;background:linear-gradient(180deg,var(--bg),#0b1430);color:var(--text);font-family:ui-sans-serif,system-ui,Segoe UI,Roboto,Arial}
+header{padding:16px 24px;background:var(--panel);border-bottom:1px solid #1a254d;display:flex;align-items:center;gap:16px;position:sticky;top:0;z-index:10}
+.title{font-size:18px;font-weight:800;letter-spacing:.6px} .pill{padding:4px 10px;border-radius:999px;background:#0c2048;color:var(--accent);border:1px solid #1a3f7a;font-size:12px}
+main{display:grid;grid-template-columns:420px 1fr;gap:16px;padding:16px;height:calc(100% - 64px)}
+.card{background:var(--panel);border:1px solid #1a254d;border-radius:14px;padding:14px;box-shadow:0 0 0 1px #0c1738 inset}
+.metrics{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.metric{padding:10px;border-radius:12px;background:#0b1533;border:1px solid #16265c}
+.metric .label{font-size:12px;color:var(--muted)} .metric .value{font-size:18px;font-weight:700}
+#log{height:340px;overflow:auto;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:13px;line-height:1.45;padding-right:6px}
+.row{padding:6px 8px;border-bottom:1px dashed #15265a} .row .ts{color:#6f8bbf;margin-right:8px}
+.row.info{color:var(--text)} .row.warn{color:var(--warn)} .row.error{color:var(--error)}
+.row.quote{color:var(--quote)} .row.opportunity{color:var(--op)} .row.send{color:var(--exec)} .row.success{color:var(--success)} .row.fail{color:var(--error)}
+.row .tag{display:inline-block;padding:2px 6px;border-radius:6px;border:1px solid #1e2f64;background:#0c1a3b;color:#9bbcff;margin-right:6px}
+.row .pair{color:#a7c4ff} .row .router{color:#9ee3ff}
+table{width:100%;border-collapse:collapse;font-size:12px} th,td{border-bottom:1px dashed #1a2b5e;padding:6px;color:#bed2ff} th{color:#9fb9f3;text-align:left}
+canvas{width:100%;height:160px;border-radius:10px;background:#0b1533;border:1px solid #16265c}
+footer{position:fixed;right:16px;bottom:16px;background:#0b1533;border:1px solid #1a254d;border-radius:12px;padding:8px 12px;color:#8fb4ff;font-size:12px;opacity:.8}
+</style></head><body>
+<header><div class="title">Swatticus Technology Slippage System</div><div class="pill" id="status">Connecting…</div></header>
+<main>
+<section class="card"><h3 style="margin:6px 0 12px">Overview</h3>
+<div class="metrics" id="metrics">
+<div class="metric"><div class="label">Started</div><div class="value" id="m-start"></div></div>
+<div class="metric"><div class="label">Ticks</div><div class="value" id="m-ticks">0</div></div>
+<div class="metric"><div class="label">Quotes</div><div class="value" id="m-quotes">0</div></div>
+<div class="metric"><div class="label">Opportunities</div><div class="value" id="m-ops">0</div></div>
+<div class="metric"><div class="label">Sent</div><div class="value" id="m-sent">0</div></div>
+<div class="metric"><div class="label">Succeeded</div><div class="value" id="m-ok">0</div></div>
+<div class="metric"><div class="label">Failed</div><div class="value" id="m-fail">0</div></div>
+<div class="metric"><div class="label">Est PnL (USD)</div><div class="value" id="m-pnl">0.00</div></div>
+</div>
+<h4 style="margin:14px 0 8px">Targets (from .env)</h4>
+<div class="metrics">
+<div class="metric"><div class="label">Bankroll</div><div class="value" id="t-bank">$0</div></div>
+<div class="metric"><div class="label">Daily Target %</div><div class="value" id="t-pct">0%</div></div>
+<div class="metric"><div class="label">Per Hour</div><div class="value" id="t-hour">$0</div></div>
+<div class="metric"><div class="label">Per Day</div><div class="value" id="t-day">$0</div></div>
+<div class="metric"><div class="label">Per Week</div><div class="value" id="t-week">$0</div></div>
+<div class="metric"><div class="label">Per Month</div><div class="value" id="t-month">$0</div></div>
+</div>
+<h4 style="margin:14px 0 8px">Actual PnL</h4>
+<canvas id="pnl"></canvas>
+<div class="metrics" style="margin-top:8px">
+<div class="metric"><div class="label">Last Hour</div><div class="value" id="a-hour">$0</div></div>
+<div class="metric"><div class="label">Today</div><div class="value" id="a-day">$0</div></div>
+<div class="metric"><div class="label">This Week</div><div class="value" id="a-week">$0</div></div>
+<div class="metric"><div class="label">This Month</div><div class="value" id="a-month">$0</div></div>
+</div>
+</section>
+<section class="card">
+<h3 style="margin:6px 0 12px">Live Log</h3><div id="log"></div>
+<h3 style="margin:16px 0 8px">Recent Trades (CSV)</h3>
+<div style="overflow:auto; max-height:260px">
+<table id="tbl"><thead><tr><th>ts</th><th>type</th><th>router</th><th>pair</th><th>estNetUsd</th><th>txHash</th><th>msg</th></tr></thead><tbody></tbody></table>
+</div>
+</section>
+</main>
+<footer>local only • no referrers • WS secure</footer>
+<script>
+const $ = sel => document.querySelector(sel); const logEl = $('#log'); const status = $('#status'); const wsUrl = (location.protocol === 'https:' ? 'wss' : 'ws') + '://' + location.host; let ws;
+function fmt(n, d=2){ return Number(n||0).toFixed(d); } function fmtMoney(n){ return '$' + fmt(n); } function fmtTs(s){ try{ const d = new Date(s); return d.toISOString().split('T')[1].replace('Z',''); }catch{return s} }
+function addRow(msg){ const r = document.createElement('div'); r.className = ['row', msg.level, msg.type].join(' '); const tags = []; if (msg.type) tags.push(`<span class="tag">${msg.type}</span>`); if (msg.router) tags.push(`<span class="tag">router:${msg.router}</span>`);
+  r.innerHTML = [`<span class="ts">${fmtTs(msg.ts)}</span>`, ...tags, msg.pair?`<span class="pair">${msg.pair}</span>`:'', msg.msg?` — ${msg.msg}`:''].join(' '); logEl.appendChild(r); logEl.scrollTop = logEl.scrollHeight; }
+function setMetrics(s){ $('#m-start').textContent = s.startedAt || '-'; $('#m-ticks').textContent = s.ticks ?? 0; $('#m-quotes').textContent = s.quotes ?? 0; $('#m-ops').textContent = s.opportunities ?? 0; $('#m-sent').textContent = s.sent ?? 0; $('#m-ok').textContent = s.succeeded ?? 0; $('#m-fail').textContent = s.failed ?? 0; $('#m-pnl').textContent = fmt(s.estPnlUsd||0); }
+function setTargets(t){ $('#t-bank').textContent = fmtMoney(t.bankroll); $('#t-pct').textContent = fmt(t.dailyPct,1) + '%'; $('#t-hour').textContent = fmtMoney(t.perHour); $('#t-day').textContent = fmtMoney(t.perDay); $('#t-week').textContent = fmtMoney(t.perWeek); $('#t-month').textContent = fmtMoney(t.perMonth); }
+function setActual(a){ $('#a-hour').textContent = fmtMoney(a.hour); $('#a-day').textContent = fmtMoney(a.day); $('#a-week').textContent = fmtMoney(a.week); $('#a-month').textContent = fmtMoney(a.month); }
+function drawChart(data){ const c = document.getElementById('pnl'); const ctx = c.getContext('2d'); const w=c.width, h=c.height; ctx.clearRect(0,0,w,h); const N = data.length; if (!N) return;
+  const vals=[]; let sum=0; data.forEach(x=>{ const v=parseFloat(x.estNetUsd||'0')||0; sum+=v; vals.push(sum); }); const min=Math.min(...vals), max=Math.max(...vals), pad=10;
+  const scaleY=v=> h - pad - ( ((v-min)/((max-min)||1))*(h-pad*2) ); const stepX=(w-pad*2)/Math.max(1,N-1); ctx.beginPath(); ctx.moveTo(pad, scaleY(vals[0])); for(let i=1;i<N;i++){ ctx.lineTo(pad+i*stepX, scaleY(vals[i])); } ctx.strokeStyle='#20c997'; ctx.lineWidth=2; ctx.stroke(); }
+function updateLogsTable(rows){ const tb = document.querySelector('#tbl tbody'); tb.innerHTML = ''; rows.forEach(r=>{ const tr=document.createElement('tr'); tr.innerHTML = `<td>${r.ts||''}</td><td>${r.type||''}</td><td>${r.router||''}</td><td>${r.pair||''}</td><td>${r.estNetUsd||''}</td><td>${r.txHash||''}</td><td>${r.msg||''}</td>`; tb.appendChild(tr); }); drawChart(rows.filter(r=>r.type==='success').slice(-50)); }
+function fetchJSON(url){ return fetch(url, {cache:'no-store', credentials:'include'}).then(r=>r.json()); }
+function poll(){ fetchJSON('/api/pnl').then(({pnl,targets})=>{ setTargets(targets); setActual(pnl); }).catch(()=>{}); fetchJSON('/api/logs?limit=200').then(({rows})=> updateLogsTable(rows)).catch(()=>{}); }
+function connect(){ const ws = new WebSocket(wsUrl); window._ws = ws; ws.onopen = () => { status.textContent = 'Connected'; }; ws.onclose = () => { status.textContent = 'Reconnecting…'; setTimeout(connect, 1000); }; ws.onmessage = (e) => { try{ const msg = JSON.parse(e.data); if (msg.type==='hello' && msg.stats){ setMetrics(msg.stats); return; } addRow(msg); if (msg.stats) setMetrics(msg.stats); }catch{} }; }
+setInterval(poll, 5000); connect();
+</script></body></html>

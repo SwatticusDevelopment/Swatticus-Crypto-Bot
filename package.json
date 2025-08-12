@@ -1,0 +1,21 @@
+{
+  "name": "swatticus-technology-slippage-system",
+  "version": "1.3.2",
+  "description": "Swatticus Technology Slippage System \u2014 Any-pair on Base/Ethereum via Uniswap v3/v2 (RPC only).",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js",
+    "debug:quote": "node tools/debug-quote.js",
+    "test:quote": "node tools/test-quote.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "ethers": "^6.15.0",
+    "ws": "^8.17.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
+  }
+}

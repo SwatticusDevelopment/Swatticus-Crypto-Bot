@@ -1,0 +1,25 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Settings — Swatticus Technology Slippage System</title>
+<style>
+:root{ --bg:#0a1020; --panel:#0f1833; --text:#cfe3ff; --muted:#7f9ccf; --accent:#4ea1ff; }
+html,body{height:100%} body{margin:0;background:linear-gradient(180deg,var(--bg),#0b1430); display:flex; align-items:center; justify-content:center; font-family:system-ui, Segoe UI, Roboto, Arial; color:var(--text)}
+.card{width:520px;background:var(--panel); border:1px solid #1a254d; border-radius:16px; padding:20px; box-shadow:0 0 0 1px #0c1738 inset}
+h1{margin:0 0 10px; font-size:20px} p{margin:0 0 16px; color:var(--muted); font-size:13px}
+label{display:block; margin:10px 0 4px; font-size:12px; color:#9bbcff} input{width:100%; padding:10px 12px; border-radius:10px; border:1px solid #1a3f7a; background:#0b1533; color:var(--text); outline:none}
+button{margin-top:14px; padding:10px 12px; border-radius:10px; border:1px solid #2054a8; background:#103a7b; color:#cfe3ff; cursor:pointer; font-weight:600}
+.row{display:grid; grid-template-columns:1fr 1fr; gap:10px} .warn{color:#ffb020; font-size:12px; margin-top:4px}
+</style></head><body>
+<div class="card"><h1>Settings</h1><p>Admin-only controls. Values apply live without restart.</p>
+<div class="row"><div><label>Min USD Profit</label><input id="cfg-min" placeholder="0.5"/></div><div><label>Base Trade USD</label><input id="cfg-base" placeholder="30"/></div></div>
+<div class="row"><div><label>Base RPC RPS</label><input id="cfg-rps" placeholder="0.5"/></div><div><label>Mempool Boost Multiplier</label><input id="cfg-boost" placeholder="2"/></div></div>
+<label>Routers (comma list)</label><input id="cfg-routers" placeholder="0x,1inch,paraswap,kyber,cow"/>
+<label>Router Weights (router:weight,comma)</label><input id="cfg-weights" placeholder="0x:1,1inch:1,paraswap:1.2,kyber:1,cow:0.9"/>
+<label>Panic Stop</label><input id="cfg-panic" placeholder="false"/><div class="warn">Panic Stop pauses execution while scanning/logging continues.</div>
+<button id="cfg-save">Save</button></div>
+<script>
+const $ = sel => document.querySelector(sel); function fetchJSON(url){ return fetch(url, {cache:'no-store', credentials:'include'}).then(r=>r.json()); }
+async function load(){ try{ const cfg = await fetchJSON('/api/config'); $('#cfg-min').value=cfg.MIN_USD_PROFIT; $('#cfg-base').value=cfg.BASE_TRADE_USD; $('#cfg-rps').value=cfg.BASE_RPC_RPS; $('#cfg-routers').value=cfg.ROUTERS; $('#cfg-boost').value=cfg.MEMPOOL_BOOST_MULT; $('#cfg-panic').value=cfg.PANIC_STOP; $('#cfg-weights').value=cfg.ROUTER_WEIGHTS; }catch(e){} }
+async function save(){ const body = new URLSearchParams({ MIN_USD_PROFIT: $('#cfg-min').value, BASE_TRADE_USD: $('#cfg-base').value, BASE_RPC_RPS: $('#cfg-rps').value, ROUTERS: $('#cfg-routers').value, MEMPOOL_BOOST_MULT: $('#cfg-boost').value, PANIC_STOP: $('#cfg-panic').value, ROUTER_WEIGHTS: $('#cfg-weights').value });
+  await fetch('/api/config', { method:'POST', body, credentials:'include' }); alert('Saved.'); }
+$('#cfg-save').onclick = save; load();
+</script></body></html>
